@@ -326,7 +326,6 @@ def run_evaluation(pl_module, dataloader, mode='gen', verbose=True, save_visuali
 def _visualize_batch(batch, outputs, output_dir, batch_idx):
     """可视化一个batch的结果"""
     import matplotlib.pyplot as plt
-    from lightglue import viz2d
     
     output_dir = Path(output_dir)
     batch_size = batch['image0'].shape[0]
@@ -394,12 +393,28 @@ def _visualize_batch(batch, outputs, output_dir, batch_idx):
                     pt = kpts1_np[idx1]
                     cv2.circle(img1_color, (int(pt[0]), int(pt[1])), 4, (0, 0, 255), -1)
                 
-                # 使用 viz2d 绘制匹配连线
+                # 绘制匹配连线 (替换 lightglue.viz2d)
                 try:
+                    margin = 10
+                    h1, w1 = img0.shape[:2]
+                    h2, w2 = img1.shape[:2]
+                    H = max(h1, h2)
+                    W = w1 + w2 + margin
+                    
+                    out_img = np.zeros((H, W), dtype=np.uint8)
+                    out_img[:h1, :w1] = img0
+                    out_img[:h2, w1+margin:w1+margin+w2] = img1
+                    
                     fig = plt.figure(figsize=(12, 6))
-                    viz2d.plot_images([img0, img1])
+                    plt.imshow(out_img, cmap='gray')
+                    plt.axis('off')
+                    
                     if len(m_indices_0) > 0:
-                        viz2d.plot_matches(kpts0_np[m_indices_0], kpts1_np[m_indices_1], color='lime', lw=0.5)
+                        pts0 = kpts0_np[m_indices_0]
+                        pts1 = kpts1_np[m_indices_1] + np.array([w1 + margin, 0])
+                        for p0, p1 in zip(pts0, pts1):
+                            plt.plot([p0[0], p1[0]], [p0[1], p1[1]], color='lime', lw=0.5)
+                            
                     plt.savefig(str(save_path / "matches.png"), bbox_inches='tight', dpi=100)
                     plt.close(fig)
                 except Exception as e:
