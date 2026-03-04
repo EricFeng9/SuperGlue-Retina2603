@@ -203,7 +203,7 @@ class SuperGlue(nn.Module):
         'match_threshold': 0.2,
     }
 
-    def __init__(self, config):
+    def __init__(self, config, pretrained_path=None):
         super().__init__()
         self.config = {**self.default_config, **config}
 
@@ -220,26 +220,51 @@ class SuperGlue(nn.Module):
         bin_score = torch.nn.Parameter(torch.tensor(1.))
         self.register_parameter('bin_score', bin_score)
 
-        assert self.config['weights'] in ['indoor', 'outdoor']
-        path = Path(__file__).parent
-        path = path / 'weights/superglue_{}.pth'.format(self.config['weights'])
-        self.load_state_dict(torch.load(str(path)))
-        print('Loaded SuperGlue model (\"{}\" weights)'.format(
-            self.config['weights']))
+        # 加载预训练权重（支持自定义路径）
+        if pretrained_path is not None:
+            self.load_pretrained(pretrained_path)
+        elif self.config['weights'] in ['indoor', 'outdoor']:
+            path = Path(__file__).parent
+            path = path / 'weights/superglue_{}.pth'.format(self.config['weights'])
+            if path.exists():
+                self.load_state_dict(torch.load(str(path)))
+                print('Loaded SuperGlue model ("{}" weights)'.format(
+                    self.config['weights']))
+            else:
+                print('Warning: SuperGlue weights not found at {}, training from scratch'.format(path))
 
-    def forward(self, data):
-        """Run SuperGlue on a pair of keypoints and descriptors"""
+    def load_pretrained(self, pretrained_path):
+        """加载预训练权重（支持自定义路径）"""
+        pretrained_path = Path(pretrained_path)
+        if pretrained_path.exists():
+            self.load_state_dict(torch.load(str(pretrained_path)))
+            print('Loaded SuperGlue pretrained weights from: {}'.format(pretrained_path))
+        else:
+            print('Warning: Pretrained weights not found at {}, training from scratch'.format(pretrained_path))
+
+    def forward(self, data, return_scores=False):
+        """Run SuperGlue on a pair of keypoints and descriptors
+
+        Args:
+            data: Dictionary containing keypoints and descriptors
+            return_scores: If True, return the raw matching scores before thresholding (for training)
+        """
         desc0, desc1 = data['descriptors0'], data['descriptors1']
         kpts0, kpts1 = data['keypoints0'], data['keypoints1']
 
         if kpts0.shape[1] == 0 or kpts1.shape[1] == 0:  # no keypoints
             shape0, shape1 = kpts0.shape[:-1], kpts1.shape[:-1]
-            return {
+            out = {
                 'matches0': kpts0.new_full(shape0, -1, dtype=torch.int),
                 'matches1': kpts1.new_full(shape1, -1, dtype=torch.int),
                 'matching_scores0': kpts0.new_zeros(shape0),
                 'matching_scores1': kpts1.new_zeros(shape1),
             }
+            if return_scores:
+                # 占位，避免上层训练/验证读取 outputs['scores'] 报 KeyError
+                b = kpts0.shape[0]
+                out['scores'] = kpts0.new_zeros((b, 1, 1))
+            return out
 
         # Keypoint normalization.
         kpts0 = normalize_keypoints(kpts0, data['image0'].shape)
@@ -277,9 +302,13 @@ class SuperGlue(nn.Module):
         indices0 = torch.where(valid0, indices0, indices0.new_tensor(-1))
         indices1 = torch.where(valid1, indices1, indices1.new_tensor(-1))
 
-        return {
+        out = {
             'matches0': indices0, # use -1 for invalid match
             'matches1': indices1, # use -1 for invalid match
             'matching_scores0': mscores0,
             'matching_scores1': mscores1,
         }
+        if return_scores:
+            # 返回完整的 Sinkhorn 输出 [B, M+1, N+1]（log-space）
+            out['scores'] = scores
+        return out

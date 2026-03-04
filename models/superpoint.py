@@ -108,7 +108,7 @@ class SuperPoint(nn.Module):
         'remove_borders': 4,
     }
 
-    def __init__(self, config):
+    def __init__(self, config, pretrained_path=None):
         super().__init__()
         self.config = {**self.default_config, **config}
 
@@ -133,14 +133,30 @@ class SuperPoint(nn.Module):
             c5, self.config['descriptor_dim'],
             kernel_size=1, stride=1, padding=0)
 
-        path = Path(__file__).parent / 'weights/superpoint_v1.pth'
-        self.load_state_dict(torch.load(str(path)))
+        # 加载预训练权重（支持自定义路径）
+        if pretrained_path is not None:
+            self.load_pretrained(pretrained_path)
+        else:
+            path = Path(__file__).parent / 'weights/superpoint_v1.pth'
+            if path.exists():
+                self.load_state_dict(torch.load(str(path)))
+            else:
+                print('Warning: SuperPoint v1 weights not found at {}, training from random init'.format(path))
 
         mk = self.config['max_keypoints']
         if mk == 0 or mk < -1:
-            raise ValueError('\"max_keypoints\" must be positive or \"-1\"')
+            raise ValueError('"max_keypoints" must be positive or "-1"')
 
         print('Loaded SuperPoint model')
+
+    def load_pretrained(self, pretrained_path):
+        """加载预训练权重（支持自定义路径）"""
+        pretrained_path = Path(pretrained_path)
+        if pretrained_path.exists():
+            self.load_state_dict(torch.load(str(pretrained_path)))
+            print('Loaded SuperPoint pretrained weights from: {}'.format(pretrained_path))
+        else:
+            print('Warning: Pretrained weights not found at {}, training from random init'.format(pretrained_path))
 
     def forward(self, data):
         """ Compute keypoints, scores, descriptors for image """
