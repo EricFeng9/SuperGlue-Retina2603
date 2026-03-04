@@ -13,6 +13,7 @@ import torch
 from loguru import logger
 import argparse
 import pytorch_lightning as pl
+import random
 
 # 添加父目录到 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
@@ -23,6 +24,100 @@ from scripts.v1.metrics import (
     error_auc,
     compute_auc_rop
 )
+
+
+# ============ CFFA 数据集包装器 (与 train_onReal.py 对齐) ============
+class CFFADatasetWrapper(torch.utils.data.Dataset):
+    """CFFA 数据集包装器 - 将 CFFADataset 转换为 SuperGlue 需要的格式"""
+    def __init__(self, base_dataset, split_name='unknown'):
+        self.base_dataset = base_dataset
+        self.split_name = split_name
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        fix_tensor, moving_original_tensor, moving_gt_tensor, fix_path, moving_path, T_0to1 = self.base_dataset[idx]
+        # 将 [-1, 1] 转换为 [0, 1]
+        moving_original_tensor = (moving_original_tensor + 1) / 2
+        moving_gt_tensor = (moving_gt_tensor + 1) / 2
+
+        # 转换为灰度图
+        if fix_tensor.shape[0] == 3:
+            fix_gray = 0.299 * fix_tensor[0] + 0.587 * fix_tensor[1] + 0.114 * fix_tensor[2]
+            fix_gray = fix_gray.unsqueeze(0)
+        else:
+            fix_gray = fix_tensor
+
+        if moving_gt_tensor.shape[0] == 3:
+            moving_gray = 0.299 * moving_gt_tensor[0] + 0.587 * moving_gt_tensor[1] + 0.114 * moving_gt_tensor[2]
+            moving_gray = moving_gray.unsqueeze(0)
+        else:
+            moving_gray = moving_gt_tensor
+
+        if moving_original_tensor.shape[0] == 3:
+            moving_orig_gray = 0.299 * moving_original_tensor[0] + 0.587 * moving_original_tensor[1] + 0.114 * moving_original_tensor[2]
+            moving_orig_gray = moving_orig_gray.unsqueeze(0)
+        else:
+            moving_orig_gray = moving_original_tensor
+
+        fix_name = os.path.basename(fix_path)
+        moving_name = os.path.basename(moving_path)
+
+        # T_0to1 是从 moving 到 fix 的变换，这里需要存储逆变换
+        try:
+            T_fix_to_moving = torch.inverse(T_0to1)
+        except:
+            T_fix_to_moving = T_0to1
+
+        return {
+            'image0': fix_gray,
+            'image1': moving_orig_gray,
+            'image1_gt': moving_gray,
+            'T_0to1': T_fix_to_moving,
+            'pair_names': (fix_name, moving_name),
+            'dataset_name': 'CFFA',
+            'split': self.split_name
+        }
+
+
+class CFFADataModule(pl.LightningDataModule):
+    """CFFA 数据模块 - 加载训练集+测试集用于测试"""
+    def __init__(self, args, config, data_dir=None):
+        super().__init__()
+        self.args = args
+        self.config = config
+        # 默认使用 data/CFFA 目录
+        if data_dir is None:
+            script_dir = Path(__file__).parent.parent.parent
+            self.data_dir = script_dir / 'data' / 'CFFA'
+        else:
+            self.data_dir = Path(data_dir)
+        self.loader_params = {
+            'batch_size': args.batch_size,
+            'num_workers': args.num_workers,
+            'pin_memory': True
+        }
+
+    def setup(self, stage=None):
+        # 导入 CFFA 数据集
+        from data.CFFA.cffa_dataset import CFFADataset
+
+        # 加载训练集
+        train_base = CFFADataset(root_dir=str(self.data_dir), split='train', mode='cf2fa')
+        self.train_dataset = CFFADatasetWrapper(train_base, split_name='train')
+        logger.info(f"训练集加载: {len(self.train_dataset)} 样本")
+
+        # 加载验证/测试集
+        val_base = CFFADataset(root_dir=str(self.data_dir), split='val', mode='cf2fa')
+        self.val_dataset = CFFADatasetWrapper(val_base, split_name='test')
+        logger.info(f"测试集加载: {len(self.val_dataset)} 样本")
+
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.train_dataset, shuffle=False, **self.loader_params)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.val_dataset, shuffle=False, **self.loader_params)
 
 
 def filter_valid_area(img1, img2):
@@ -490,18 +585,20 @@ def create_chessboard(img1, img2, grid_size=4):
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="SuperGlue 统一测试脚本")
-    parser.add_argument('--mode', type=str, required=True, choices=['gen', 'cffa'],
-                        help='测试模式: gen (生成数据) 或 cffa (CFFA真实数据)')
+    parser.add_argument('--mode', type=str, required=True, choices=['gen', 'real'],
+                        help='模型类型: gen (train_onGen_vessels.py训练) 或 real (train_onReal.py训练)')
     parser.add_argument('--name', type=str, required=True,
-                        help='模型名称（用于定位 results/superglue_[mode]/[name] 下的 best_checkpoint）')
+                        help='模型名称（用于定位检查点）')
     parser.add_argument('--test_name', type=str, required=True,
-                        help='测试名称（结果保存在 results/superglue_[mode]/[name]/[test_name] 下）')
+                        help='测试名称（结果保存在 results/superglue_[gen|real]/[name]/[test_name] 下）')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='检查点路径（默认使用 best_checkpoint/model.ckpt）')
     parser.add_argument('--batch_size', type=int, default=4, help='批次大小')
     parser.add_argument('--num_workers', type=int, default=8, help='数据加载线程数')
     parser.add_argument('--gpus', type=str, default='0', help='GPU设备ID')
     parser.add_argument('--img_size', type=int, default=512, help='图像大小')
+    parser.add_argument('--test_split', type=str, default='both', choices=['train', 'test', 'both'],
+                        help='测试数据集选择: train (仅训练集), test (仅测试集), both (训练集+测试集)')
     return parser.parse_args()
 
 
@@ -511,25 +608,24 @@ def main():
     
     # 导入必要的模块（根据mode动态导入）
     if args.mode == 'gen':
-        # 导入生成数据相关模块
+        # 导入生成数据训练的模型
         from scripts.v1.train_onGen_vessels import (
             PL_SuperGlue_Gen,
-            MultimodalDataModule as GenDataModule,
             get_default_config
         )
         pl_class = PL_SuperGlue_Gen
-        data_module_class = GenDataModule
         mode_dir = 'superglue_gen'
-    else:  # cffa
-        # 导入真实数据相关模块
+    else:  # real
+        # 导入真实数据训练的模型
         from scripts.v1.train_onReal import (
             PL_SuperGlue_Real,
-            MultimodalDataModule as RealDataModule,
             get_default_config
         )
         pl_class = PL_SuperGlue_Real
-        data_module_class = RealDataModule
         mode_dir = 'superglue_cffa'
+    
+    # 始终使用 CFFA 数据集进行测试
+    data_module_class = CFFADataModule
     
     # 获取配置
     config = get_default_config()
@@ -592,20 +688,103 @@ def main():
     # 初始化数据模块
     data_module = data_module_class(args, config)
     data_module.setup('fit')  # 使用 'fit' 来加载验证集
-    test_dataloader = data_module.val_dataloader()  # 使用验证集作为测试集
-    
-    logger.info(f"开始测试 (模式: {args.mode} | 模型: {args.name})")
-    
-    # 使用 run_evaluation 函数进行测试（带可视化）
-    set_metrics_verbose(True)
-    metrics = run_evaluation(
-        model, 
-        test_dataloader, 
-        mode=args.mode, 
-        verbose=True,
-        save_visualizations=True,  # 启用可视化
-        output_dir=output_dir       # 保存到输出目录
-    )
+
+    # 测试数据集：使用 --test_split 参数指定：'train', 'test', 或 'both'
+    # 始终在 CFFA 数据集上测试
+    test_split = getattr(args, 'test_split', 'both')
+
+    if test_split == 'both':
+        # 合并训练集和测试集进行测试
+        logger.info("测试模式: CFFA 训练集 + 测试集 合并测试")
+        train_dataloader = data_module.train_dataloader()
+        test_dataloader = data_module.val_dataloader()
+
+        # 分别测试并合并结果
+        set_metrics_verbose(True)
+
+        # 测试训练集
+        logger.info("=" * 50)
+        logger.info("开始测试 CFFA 训练集")
+        logger.info("=" * 50)
+        metrics_train = run_evaluation(
+            model,
+            train_dataloader,
+            mode=args.mode,
+            verbose=True,
+            save_visualizations=False,
+            output_dir=output_dir / 'train_set'
+        )
+
+        # 测试测试集
+        logger.info("=" * 50)
+        logger.info("开始测试 CFFA 测试集")
+        logger.info("=" * 50)
+        metrics_test = run_evaluation(
+            model,
+            test_dataloader,
+            mode=args.mode,
+            verbose=True,
+            save_visualizations=True,
+            output_dir=output_dir / 'test_set'
+        )
+
+        # 合并两个数据集的结果
+        combined_metrics = {
+            'train_samples': metrics_train['total_samples'],
+            'test_samples': metrics_test['total_samples'],
+            'total_samples': metrics_train['total_samples'] + metrics_test['total_samples'],
+            'train_success': metrics_train['success_samples'],
+            'test_success': metrics_test['success_samples'],
+            'success_samples': metrics_train['success_samples'] + metrics_test['success_samples'],
+            'train_failed': metrics_train['failed_samples'],
+            'test_failed': metrics_test['failed_samples'],
+            'failed_samples': metrics_train['failed_samples'] + metrics_test['failed_samples'],
+            'train_inaccurate': metrics_train['inaccurate_samples'],
+            'test_inaccurate': metrics_test['inaccurate_samples'],
+            'inaccurate_samples': metrics_train['inaccurate_samples'] + metrics_test['inaccurate_samples'],
+            'train_acceptable': metrics_train['acceptable_samples'],
+            'test_acceptable': metrics_test['acceptable_samples'],
+            'acceptable_samples': metrics_train['acceptable_samples'] + metrics_test['acceptable_samples'],
+        }
+        combined_metrics['match_failure_rate'] = combined_metrics['failed_samples'] / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
+        combined_metrics['inaccurate_rate'] = combined_metrics['inaccurate_samples'] / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
+        combined_metrics['acceptable_rate'] = combined_metrics['acceptable_samples'] / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
+        combined_metrics['mse'] = (metrics_train['mse'] * metrics_train['total_samples'] + metrics_test['mse'] * metrics_test['total_samples']) / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
+        combined_metrics['mace'] = (metrics_train['mace'] * metrics_train['total_samples'] + metrics_test['mace'] * metrics_test['total_samples']) / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
+        combined_metrics['inverse_mace'] = 1.0 / (1.0 + combined_metrics['mace']) if combined_metrics['mace'] > 0 else 1.0
+        combined_metrics['auc@5'] = (metrics_train['auc@5'] + metrics_test['auc@5']) / 2
+        combined_metrics['auc@10'] = (metrics_train['auc@10'] + metrics_test['auc@10']) / 2
+        combined_metrics['auc@20'] = (metrics_train['auc@20'] + metrics_test['auc@20']) / 2
+        combined_metrics['mAUC'] = (metrics_train['mAUC'] + metrics_test['mAUC']) / 2
+        combined_metrics['combined_auc'] = (combined_metrics['auc@5'] + combined_metrics['auc@10'] + combined_metrics['auc@20']) / 3.0
+
+        metrics = combined_metrics
+    elif test_split == 'train':
+        # 仅测试训练集
+        logger.info("测试模式: CFFA 仅训练集")
+        test_dataloader = data_module.train_dataloader()
+        set_metrics_verbose(True)
+        metrics = run_evaluation(
+            model,
+            test_dataloader,
+            mode=args.mode,
+            verbose=True,
+            save_visualizations=True,
+            output_dir=output_dir
+        )
+    else:
+            # 默认仅测试测试集
+            logger.info("测试模式: CFFA 仅测试集")
+            test_dataloader = data_module.val_dataloader()
+            set_metrics_verbose(True)
+            metrics = run_evaluation(
+                model,
+                test_dataloader,
+                mode=args.mode,
+                verbose=True,
+                save_visualizations=True,
+                output_dir=output_dir
+            )
     
     # 保存测试总结
     summary_path = output_dir / "test_summary.txt"

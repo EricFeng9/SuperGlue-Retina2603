@@ -334,53 +334,48 @@ class PL_SuperGlue_Gen(pl.LightningModule):
                 feats0 = self.extractor({'image': batch['image0']})
                 feats1 = self.extractor({'image': batch['image1']})
 
-                # SuperPoint 返回的是 list，每张图 keypoints 数量可能不同，需 pad 到同一长度再 stack
-                # 其中：
-                #   keypoints: [Ni, 2]
-                #   descriptors: [C, Ni]  (通道在前，和原版 SuperGlue 保持一致)
-                #   scores: [Ni]
-                def list_to_batch(feats, batch_size):
+                # SuperPoint 返回的是 list，每张图 keypoints 数量可能不同，需取最小公共数量再截断
+                # （与 train_onReal.py 保持一致：n_common 截断方式）
+                def list_to_batch(feats):
                     keys = feats['keypoints']
                     descs = feats['descriptors']
                     scs = feats['scores']
-                    device = keys[0].device
 
-                    max_kpts = max(k.shape[0] for k in keys)  # 当前 batch 中最大的 Ni
-                    dim_desc = descs[0].shape[0]              # 描述子通道数 C（通常为 256）
+                    # 取 batch 中最小的 keypoint 数量作为公共数量
+                    lengths = [int(k.shape[0]) for k in keys]
+                    if len(lengths) == 0:
+                        raise ValueError('Empty SuperPoint features.')
+                    n_common = min(lengths)
 
-                    keypoints_list, descriptors_list, scores_list = [], [], []
+                    if n_common <= 0:
+                        device = keys[0].device if len(keys) > 0 else batch['image0'].device
+                        keypoints = torch.zeros((len(lengths), 0, 2), device=device, dtype=torch.float32)
+                        descriptors = torch.zeros((len(lengths), 256, 0), device=device, dtype=torch.float32)
+                        scores = torch.zeros((len(lengths), 0), device=device, dtype=torch.float32)
+                        return keypoints, descriptors, scores
+
+                    kpts_b, desc_b, scores_b = [], [], []
                     for k, d, s in zip(keys, descs, scs):
-                        n = k.shape[0]
+                        k = k.float()
+                        d = d.float()
+                        s = s.float()
+                        if k.shape[0] > n_common:
+                            topk = torch.topk(s, k=n_common, dim=0, largest=True, sorted=False).indices
+                            k = k[topk]
+                            s = s[topk]
+                            d = d[:, topk]
+                        kpts_b.append(k)
+                        desc_b.append(d)
+                        scores_b.append(s)
 
-                        # [Ni, 2] -> [max_kpts, 2]
-                        k_pad = torch.zeros(max_kpts, 2, device=device, dtype=k.dtype)
-                        k_pad[:n] = k.float()
-
-                        # [C, Ni] -> [C, max_kpts]
-                        d_pad = torch.zeros(dim_desc, max_kpts, device=device, dtype=d.dtype)
-                        d_pad[:, :n] = d.float()
-
-                        # [Ni] -> [max_kpts]
-                        s_pad = torch.zeros(max_kpts, device=device, dtype=s.dtype)
-                        s_pad[:n] = s.float()
-
-                        keypoints_list.append(k_pad)
-                        descriptors_list.append(d_pad)
-                        scores_list.append(s_pad)
-
-                    # 形成 batch：
-                    #   keypoints:   [B, max_kpts, 2]
-                    #   descriptors: [B, C, max_kpts]
-                    #   scores:      [B, max_kpts]
-                    return (
-                        torch.stack(keypoints_list, dim=0),
-                        torch.stack(descriptors_list, dim=0),
-                        torch.stack(scores_list, dim=0),
-                    )
+                    keypoints = torch.stack(kpts_b, dim=0)
+                    descriptors = torch.stack(desc_b, dim=0)
+                    scores = torch.stack(scores_b, dim=0)
+                    return keypoints, descriptors, scores
 
                 batch_size = batch['image0'].shape[0]
-                kpts0, desc0, sc0 = list_to_batch(feats0, batch_size)
-                kpts1, desc1, sc1 = list_to_batch(feats1, batch_size)
+                kpts0, desc0, sc0 = list_to_batch(feats0)
+                kpts1, desc1, sc1 = list_to_batch(feats1)
 
                 batch.update({
                     'keypoints0': kpts0,
@@ -413,41 +408,48 @@ class PL_SuperGlue_Gen(pl.LightningModule):
                 feats0 = self.extractor({'image': batch['image0']})
                 feats1 = self.extractor({'image': batch['image1']})
 
-                def list_to_batch(feats, batch_size):
+                # SuperPoint 返回的是 list，每张图 keypoints 数量可能不同，需取最小公共数量再截断
+                # （与 train_onReal.py 保持一致：n_common 截断方式）
+                def list_to_batch(feats):
                     keys = feats['keypoints']
                     descs = feats['descriptors']
                     scs = feats['scores']
-                    device = keys[0].device
 
-                    max_kpts = max(k.shape[0] for k in keys)
-                    dim_desc = descs[0].shape[0]
+                    # 取 batch 中最小的 keypoint 数量作为公共数量
+                    lengths = [int(k.shape[0]) for k in keys]
+                    if len(lengths) == 0:
+                        raise ValueError('Empty SuperPoint features.')
+                    n_common = min(lengths)
 
-                    keypoints_list, descriptors_list, scores_list = [], [], []
+                    if n_common <= 0:
+                        device = keys[0].device if len(keys) > 0 else batch['image0'].device
+                        keypoints = torch.zeros((len(lengths), 0, 2), device=device, dtype=torch.float32)
+                        descriptors = torch.zeros((len(lengths), 256, 0), device=device, dtype=torch.float32)
+                        scores = torch.zeros((len(lengths), 0), device=device, dtype=torch.float32)
+                        return keypoints, descriptors, scores
+
+                    kpts_b, desc_b, scores_b = [], [], []
                     for k, d, s in zip(keys, descs, scs):
-                        n = k.shape[0]
+                        k = k.float()
+                        d = d.float()
+                        s = s.float()
+                        if k.shape[0] > n_common:
+                            topk = torch.topk(s, k=n_common, dim=0, largest=True, sorted=False).indices
+                            k = k[topk]
+                            s = s[topk]
+                            d = d[:, topk]
+                        kpts_b.append(k)
+                        desc_b.append(d)
+                        scores_b.append(s)
 
-                        k_pad = torch.zeros(max_kpts, 2, device=device, dtype=k.dtype)
-                        k_pad[:n] = k.float()
-
-                        d_pad = torch.zeros(dim_desc, max_kpts, device=device, dtype=d.dtype)
-                        d_pad[:, :n] = d.float()
-
-                        s_pad = torch.zeros(max_kpts, device=device, dtype=s.dtype)
-                        s_pad[:n] = s.float()
-
-                        keypoints_list.append(k_pad)
-                        descriptors_list.append(d_pad)
-                        scores_list.append(s_pad)
-
-                    return (
-                        torch.stack(keypoints_list, dim=0),
-                        torch.stack(descriptors_list, dim=0),
-                        torch.stack(scores_list, dim=0),
-                    )
+                    keypoints = torch.stack(kpts_b, dim=0)
+                    descriptors = torch.stack(desc_b, dim=0)
+                    scores = torch.stack(scores_b, dim=0)
+                    return keypoints, descriptors, scores
 
                 batch_size = batch['image0'].shape[0]
-                kpts0, desc0, sc0 = list_to_batch(feats0, batch_size)
-                kpts1, desc1, sc1 = list_to_batch(feats1, batch_size)
+                kpts0, desc0, sc0 = list_to_batch(feats0)
+                kpts1, desc1, sc1 = list_to_batch(feats1)
 
                 batch.update({
                     'keypoints0': kpts0,

@@ -253,8 +253,9 @@ def spatial_binning(pts0, pts1, img_size, grid_size=4, top_n=20, conf=None):
 def compute_homography_errors(data, config):
     """
     计算单应矩阵估计误差 (针对 MultiModal 数据集)
+    新增：返回 mae, mee 用于判断 inaccurate
     """
-    data.update({'R_errs': [], 't_errs': [], 'inliers': [], 'H_est': []})
+    data.update({'R_errs': [], 't_errs': [], 'inliers': [], 'H_est': [], 'mae': [], 'mee': []})
     
     m_bids = data['m_bids'].cpu().numpy()
     pts0 = data['mkpts0_f'].cpu().numpy()
@@ -274,6 +275,8 @@ def compute_homography_errors(data, config):
             data['t_errs'].append(np.inf)
             data['inliers'].append(np.array([]).astype(bool))
             data['H_est'].append(np.eye(3))
+            data['mae'].append(np.inf)
+            data['mee'].append(np.inf)
             continue
             
         # 估计单应矩阵 (对应 plan.md 第四阶段: 几何估计)
@@ -301,63 +304,108 @@ def compute_homography_errors(data, config):
             data['t_errs'].append(np.inf)
             data['inliers'].append(np.array([]).astype(bool))
             data['H_est'].append(np.eye(3))
+            data['mae'].append(np.inf)
+            data['mee'].append(np.inf)
         else:
             # 【调试】检查 inliers 数量和矩阵状态
             num_inliers = np.sum(inliers.ravel() > 0) if inliers is not None else 0
             is_identity = np.allclose(H_est, np.eye(3), atol=1e-3)
             
-            # 防爆锁检查
-            is_valid = True
-            if np.isnan(H_est).any() or np.isinf(H_est).any():
-                is_valid = False
-            else:
-                det = np.linalg.det(H_est[:2, :2])
-                if det < 0.1 or det > 10.0:
-                    is_valid = False
-                if abs(H_est[2, 0]) > 0.005 or abs(H_est[2, 1]) > 0.005:
-                    is_valid = False
+            # 与 test_on_CrossModality.py 对齐：仅根据 inliers 判断是否失败
+            # 仅根据 inliers 判断是否失败
             
-            _dual_log("INFO", f"✅ Batch {bs}: RANSAC 成功, inliers={num_inliers}/{len(bin_indices) if len(bin_indices) >= 4 else num_matches}, H_est是否单位矩阵={is_identity}, 是否有效={is_valid}")
+            _dual_log("INFO", f"✅ Batch {bs}: RANSAC 成功, inliers={num_inliers}/{len(bin_indices) if len(bin_indices) >= 4 else num_matches}")
             
-            if is_identity or not is_valid:
-                if is_identity:
-                    _dual_log("WARNING", f"⚠️ Batch {bs}: H_est 接近单位矩阵! 匹配失败")
-                if not is_valid:
-                    _dual_log("WARNING", f"⚠️ Batch {bs}: H_est 未通过防爆锁检查! 匹配失败")
-                
+            if is_identity:
+                _dual_log("WARNING", f"⚠️ Batch {bs}: H_est 接近单位矩阵! 匹配失败")
+
                 data['R_errs'].append(np.inf)
                 data['t_errs'].append(np.inf)
                 data['inliers'].append(np.array([]).astype(bool))
                 data['H_est'].append(np.eye(3))
+                data['mae'].append(np.inf)
+                data['mee'].append(np.inf)
             else:
                 if num_inliers < 30:
                     _dual_log("WARNING", f"⚠️ Batch {bs}: Inliers 数量较少 ({num_inliers}), 可能导致配准质量差")
-                
+
                 # 对于眼底图像配准，我们将 R_errs 设为 0
                 data['R_errs'].append(0.0)
-                
+
                 # 重要修复：计算 Corner Error (估计 H 与 真值 H 之间的偏差)
                 h, w = data['image0'].shape[2:]
                 corners = np.array([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]], dtype=np.float32)
                 corners_h = np.concatenate([corners, np.ones((4, 1))], axis=-1)
-                
+
                 # 使用真值 H 投影得到 GT 坐标
                 corners_gt_h = (H_gt[bs] @ corners_h.T).T
                 corners_gt = corners_gt_h[:, :2] / (corners_gt_h[:, 2:] + 1e-7)
-                
+
                 # 使用估计 H 投影得到预测坐标
                 corners_est_h = (H_est @ corners_h.T).T
                 corners_est = corners_est_h[:, :2] / (corners_est_h[:, 2:] + 1e-7)
-                
+
                 # 计算平均角点误差
                 err = np.mean(np.linalg.norm(corners_est - corners_gt, axis=-1))
-                
+
                 data['t_errs'].append(err)
                 data['inliers'].append(inliers.ravel() > 0)
                 data['H_est'].append(H_est)
 
+                # 计算点对点误差，用于判断 inaccurate
+                pts0_batch = pts0[mask]
+                pts1_batch = pts1[mask]
+                mae, mee, _ = compute_pointwise_errors(pts0_batch, pts1_batch, H_est)
+                data['mae'].append(mae)
+                data['mee'].append(mee)
 
-# --- METRIC AGGREGATION ---
+
+def compute_pointwise_errors(pts0, pts1, H_est):
+    """
+    计算点对点的投影误差（用于判断 inaccurate）
+
+    Args:
+        pts0: 源图像匹配点 [N, 2]
+        pts1: 目标图像匹配点 [N, 2]
+        H_est: 估计的单应矩阵 [3, 3]
+
+    Returns:
+        mae: 最大误差 (Maximum Absolute Error)
+        mee: 中位误差 (Median Error)
+        dis: 所有点的误差数组 [N]
+    """
+    if pts0 is None or len(pts0) == 0:
+        return np.inf, np.inf, np.array([])
+
+    pts0_h = np.concatenate([pts0, np.ones((pts0.shape[0], 1))], axis=-1)
+    pts1_pred_h = (H_est @ pts0_h.T).T
+    pts1_pred = pts1_pred_h[:, :2] / (pts1_pred_h[:, 2:] + 1e-7)
+
+    dis = np.sqrt(np.sum((pts1 - pts1_pred) ** 2, axis=1))
+    mae = np.max(dis)
+    mee = np.median(dis)
+
+    return mae, mee, dis
+
+
+# --- INACCURATE 判断阈值 ---
+# 与 test_on_CrossModality.py 保持一致
+INACCURATE_MAE_THRESHOLD = 50.0  # 最大误差 > 50 像素视为 inaccurate
+INACCURATE_MEE_THRESHOLD = 20.0  # 中位误差 > 20 像素视为 inaccurate
+
+
+def is_inaccurate(mae, mee):
+    """
+    判断样本是否 inaccurate（不准确但未失败）
+
+    Args:
+        mae: 最大误差
+        mee: 中位误差
+
+    Returns:
+        bool: True 表示 inaccurate
+    """
+    return mae > INACCURATE_MAE_THRESHOLD or mee > INACCURATE_MEE_THRESHOLD
 
 def error_auc(errors, thresholds):
     """
