@@ -306,39 +306,55 @@ def compute_homography_errors(data, config):
             num_inliers = np.sum(inliers.ravel() > 0) if inliers is not None else 0
             is_identity = np.allclose(H_est, np.eye(3), atol=1e-3)
             
-            _dual_log("INFO", f"✅ Batch {bs}: RANSAC 成功, inliers={num_inliers}/{len(bin_indices) if len(bin_indices) >= 4 else num_matches}, H_est是否单位矩阵={is_identity}")
+            # 防爆锁检查
+            is_valid = True
+            if np.isnan(H_est).any() or np.isinf(H_est).any():
+                is_valid = False
+            else:
+                det = np.linalg.det(H_est[:2, :2])
+                if det < 0.1 or det > 10.0:
+                    is_valid = False
+                if abs(H_est[2, 0]) > 0.005 or abs(H_est[2, 1]) > 0.005:
+                    is_valid = False
             
-            if is_identity:
-                _dual_log("WARNING", f"⚠️ Batch {bs}: H_est 接近单位矩阵! 这不正常!")
-                _dual_log("WARNING", f"   pts0 范围: [{pts0_batch[:, 0].min():.1f}, {pts0_batch[:, 0].max():.1f}] x [{pts0_batch[:, 1].min():.1f}, {pts0_batch[:, 1].max():.1f}]")
-                _dual_log("WARNING", f"   pts1 范围: [{pts1_batch[:, 0].min():.1f}, {pts1_batch[:, 0].max():.1f}] x [{pts1_batch[:, 1].min():.1f}, {pts1_batch[:, 1].max():.1f}]")
-            elif num_inliers < 30:
-                _dual_log("WARNING", f"⚠️ Batch {bs}: Inliers 数量较少 ({num_inliers}), 可能导致配准质量差")
+            _dual_log("INFO", f"✅ Batch {bs}: RANSAC 成功, inliers={num_inliers}/{len(bin_indices) if len(bin_indices) >= 4 else num_matches}, H_est是否单位矩阵={is_identity}, 是否有效={is_valid}")
             
-            # 对于眼底图像配准，我们将 R_errs 设为 0
-            # 将 t_errs 设为 Corner Error，用于 AUC 计算 (对应 MegaDepth/LoFTR 的标准评测方式)
-            data['R_errs'].append(0.0)
-            
-            # 重要修复：计算 Corner Error (估计 H 与 真值 H 之间的偏差)
-            # 而不是计算 H_est 在其自身内点上的残差
-            h, w = data['image0'].shape[2:]
-            corners = np.array([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]], dtype=np.float32)
-            corners_h = np.concatenate([corners, np.ones((4, 1))], axis=-1)
-            
-            # 使用真值 H 投影得到 GT 坐标
-            corners_gt_h = (H_gt[bs] @ corners_h.T).T
-            corners_gt = corners_gt_h[:, :2] / (corners_gt_h[:, 2:] + 1e-7)
-            
-            # 使用估计 H 投影得到预测坐标
-            corners_est_h = (H_est @ corners_h.T).T
-            corners_est = corners_est_h[:, :2] / (corners_est_h[:, 2:] + 1e-7)
-            
-            # 计算平均角点误差
-            err = np.mean(np.linalg.norm(corners_est - corners_gt, axis=-1))
-            
-            data['t_errs'].append(err)
-            data['inliers'].append(inliers.ravel() > 0)
-            data['H_est'].append(H_est)
+            if is_identity or not is_valid:
+                if is_identity:
+                    _dual_log("WARNING", f"⚠️ Batch {bs}: H_est 接近单位矩阵! 匹配失败")
+                if not is_valid:
+                    _dual_log("WARNING", f"⚠️ Batch {bs}: H_est 未通过防爆锁检查! 匹配失败")
+                
+                data['R_errs'].append(np.inf)
+                data['t_errs'].append(np.inf)
+                data['inliers'].append(np.array([]).astype(bool))
+                data['H_est'].append(np.eye(3))
+            else:
+                if num_inliers < 30:
+                    _dual_log("WARNING", f"⚠️ Batch {bs}: Inliers 数量较少 ({num_inliers}), 可能导致配准质量差")
+                
+                # 对于眼底图像配准，我们将 R_errs 设为 0
+                data['R_errs'].append(0.0)
+                
+                # 重要修复：计算 Corner Error (估计 H 与 真值 H 之间的偏差)
+                h, w = data['image0'].shape[2:]
+                corners = np.array([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]], dtype=np.float32)
+                corners_h = np.concatenate([corners, np.ones((4, 1))], axis=-1)
+                
+                # 使用真值 H 投影得到 GT 坐标
+                corners_gt_h = (H_gt[bs] @ corners_h.T).T
+                corners_gt = corners_gt_h[:, :2] / (corners_gt_h[:, 2:] + 1e-7)
+                
+                # 使用估计 H 投影得到预测坐标
+                corners_est_h = (H_est @ corners_h.T).T
+                corners_est = corners_est_h[:, :2] / (corners_est_h[:, 2:] + 1e-7)
+                
+                # 计算平均角点误差
+                err = np.mean(np.linalg.norm(corners_est - corners_gt, axis=-1))
+                
+                data['t_errs'].append(err)
+                data['inliers'].append(inliers.ravel() > 0)
+                data['H_est'].append(H_est)
 
 
 # --- METRIC AGGREGATION ---
