@@ -197,9 +197,15 @@ class UnifiedEvaluator:
                 # 计算 MAE 和 MEE（用于判断 inaccurate）
                 mae = dis.max()
                 mee = np.median(dis)
-                
+
+                # 计算 MACE（角点误差）
+                T_gt = batch['T_0to1'][b].cpu().numpy()
+                h, w = batch['image0'].shape[-2], batch['image0'].shape[-1]
+                mace = compute_corner_error(H, T_gt, h, w)
+
                 # 计入 AUC（所有成功样本都计入，包括 inaccurate）
-                self.all_errors.append(avg_dist)
+                # 使用 MACE 而非 avg_dist 避免自拟合欺骗（又当裁判又当运动员）
+                self.all_errors.append(mace)
                 
                 # 判断 inaccurate（与 test_on_CrossModality.py 对齐：mae > 50 或 mee > 20）
                 is_inaccurate = mae > 50.0 or mee > 20.0
@@ -612,6 +618,10 @@ def main():
     with open(summary_path, "w") as f:
         f.write("测试总结\n")
         f.write("=" * 50 + "\n")
+        f.write(f"Mode: {args.mode}\n")
+        f.write(f"Test Name: {args.test_name}\n")
+        f.write(f"Model Name: {args.name}\n")
+        f.write("-" * 50 + "\n")
         f.write(f"总样本数: {metrics['total_samples']}\n")
         f.write(f"匹配成功样本数: {metrics['success_samples']}\n")
         f.write(f"匹配失败样本数: {metrics['failed_samples']}\n")

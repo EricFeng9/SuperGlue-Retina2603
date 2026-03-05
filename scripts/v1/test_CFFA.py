@@ -292,9 +292,15 @@ class UnifiedEvaluator:
                 # 计算 MAE 和 MEE（用于判断 inaccurate）
                 mae = dis.max()
                 mee = np.median(dis)
-                
+
+                # 计算 MACE（角点误差）
+                T_gt = batch['T_0to1'][b].cpu().numpy()
+                h, w = batch['image0'].shape[-2], batch['image0'].shape[-1]
+                mace = compute_corner_error(H, T_gt, h, w)
+
                 # 计入 AUC（所有成功样本都计入，包括 inaccurate）
-                self.all_errors.append(avg_dist)
+                # 使用 MACE 而非 avg_dist 避免自拟合欺骗（又当裁判又当运动员）
+                self.all_errors.append(mace)
                 
                 # 判断 inaccurate（与 test_on_CrossModality.py 对齐：mae > 50 或 mee > 20）
                 is_inaccurate = mae > 50.0 or mee > 20.0
@@ -597,8 +603,6 @@ def parse_args():
     parser.add_argument('--num_workers', type=int, default=8, help='数据加载线程数')
     parser.add_argument('--gpus', type=str, default='0', help='GPU设备ID')
     parser.add_argument('--img_size', type=int, default=512, help='图像大小')
-    parser.add_argument('--test_split', type=str, default='both', choices=['train', 'test', 'both'],
-                        help='测试数据集选择: train (仅训练集), test (仅测试集), both (训练集+测试集)')
     return parser.parse_args()
 
 
@@ -688,109 +692,37 @@ def main():
     # 初始化数据模块
     data_module = data_module_class(args, config)
     data_module.setup('fit')  # 使用 'fit' 来加载验证集
+    # 统一测试方式：将 CFFA 训练集和测试集拼接成一个大的数据集，只跑一次完整测试流程
+    from torch.utils.data import ConcatDataset, DataLoader
+    combined_dataset = ConcatDataset([data_module.train_dataset, data_module.val_dataset])
+    combined_loader = DataLoader(
+        combined_dataset,
+        shuffle=False,
+        **data_module.loader_params
+    )
 
-    # 测试数据集：使用 --test_split 参数指定：'train', 'test', 或 'both'
-    # 始终在 CFFA 数据集上测试
-    test_split = getattr(args, 'test_split', 'both')
-
-    if test_split == 'both':
-        # 合并训练集和测试集进行测试
-        logger.info("测试模式: CFFA 训练集 + 测试集 合并测试")
-        train_dataloader = data_module.train_dataloader()
-        test_dataloader = data_module.val_dataloader()
-
-        # 分别测试并合并结果
-        set_metrics_verbose(True)
-
-        # 测试训练集
-        logger.info("=" * 50)
-        logger.info("开始测试 CFFA 训练集")
-        logger.info("=" * 50)
-        metrics_train = run_evaluation(
-            model,
-            train_dataloader,
-            mode=args.mode,
-            verbose=True,
-            save_visualizations=False,
-            output_dir=output_dir / 'train_set'
-        )
-
-        # 测试测试集
-        logger.info("=" * 50)
-        logger.info("开始测试 CFFA 测试集")
-        logger.info("=" * 50)
-        metrics_test = run_evaluation(
-            model,
-            test_dataloader,
-            mode=args.mode,
-            verbose=True,
-            save_visualizations=True,
-            output_dir=output_dir / 'test_set'
-        )
-
-        # 合并两个数据集的结果
-        combined_metrics = {
-            'train_samples': metrics_train['total_samples'],
-            'test_samples': metrics_test['total_samples'],
-            'total_samples': metrics_train['total_samples'] + metrics_test['total_samples'],
-            'train_success': metrics_train['success_samples'],
-            'test_success': metrics_test['success_samples'],
-            'success_samples': metrics_train['success_samples'] + metrics_test['success_samples'],
-            'train_failed': metrics_train['failed_samples'],
-            'test_failed': metrics_test['failed_samples'],
-            'failed_samples': metrics_train['failed_samples'] + metrics_test['failed_samples'],
-            'train_inaccurate': metrics_train['inaccurate_samples'],
-            'test_inaccurate': metrics_test['inaccurate_samples'],
-            'inaccurate_samples': metrics_train['inaccurate_samples'] + metrics_test['inaccurate_samples'],
-            'train_acceptable': metrics_train['acceptable_samples'],
-            'test_acceptable': metrics_test['acceptable_samples'],
-            'acceptable_samples': metrics_train['acceptable_samples'] + metrics_test['acceptable_samples'],
-        }
-        combined_metrics['match_failure_rate'] = combined_metrics['failed_samples'] / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
-        combined_metrics['inaccurate_rate'] = combined_metrics['inaccurate_samples'] / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
-        combined_metrics['acceptable_rate'] = combined_metrics['acceptable_samples'] / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
-        combined_metrics['mse'] = (metrics_train['mse'] * metrics_train['total_samples'] + metrics_test['mse'] * metrics_test['total_samples']) / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
-        combined_metrics['mace'] = (metrics_train['mace'] * metrics_train['total_samples'] + metrics_test['mace'] * metrics_test['total_samples']) / combined_metrics['total_samples'] if combined_metrics['total_samples'] > 0 else 0
-        combined_metrics['inverse_mace'] = 1.0 / (1.0 + combined_metrics['mace']) if combined_metrics['mace'] > 0 else 1.0
-        combined_metrics['auc@5'] = (metrics_train['auc@5'] + metrics_test['auc@5']) / 2
-        combined_metrics['auc@10'] = (metrics_train['auc@10'] + metrics_test['auc@10']) / 2
-        combined_metrics['auc@20'] = (metrics_train['auc@20'] + metrics_test['auc@20']) / 2
-        combined_metrics['mAUC'] = (metrics_train['mAUC'] + metrics_test['mAUC']) / 2
-        combined_metrics['combined_auc'] = (combined_metrics['auc@5'] + combined_metrics['auc@10'] + combined_metrics['auc@20']) / 3.0
-
-        metrics = combined_metrics
-    elif test_split == 'train':
-        # 仅测试训练集
-        logger.info("测试模式: CFFA 仅训练集")
-        test_dataloader = data_module.train_dataloader()
-        set_metrics_verbose(True)
-        metrics = run_evaluation(
-            model,
-            test_dataloader,
-            mode=args.mode,
-            verbose=True,
-            save_visualizations=True,
-            output_dir=output_dir
-        )
-    else:
-            # 默认仅测试测试集
-            logger.info("测试模式: CFFA 仅测试集")
-            test_dataloader = data_module.val_dataloader()
-            set_metrics_verbose(True)
-            metrics = run_evaluation(
-                model,
-                test_dataloader,
-                mode=args.mode,
-                verbose=True,
-                save_visualizations=True,
-                output_dir=output_dir
-            )
+    logger.info("=" * 50)
+    logger.info("开始在【CFFA 训练集 + 测试集 合并数据】上进行一次性完整测试和指标计算")
+    logger.info("=" * 50)
+    set_metrics_verbose(True)
+    metrics = run_evaluation(
+        model,
+        combined_loader,
+        mode=args.mode,
+        verbose=True,
+        save_visualizations=True,
+        output_dir=output_dir
+    )
     
     # 保存测试总结
     summary_path = output_dir / "test_summary.txt"
     with open(summary_path, "w") as f:
         f.write("测试总结\n")
         f.write("=" * 50 + "\n")
+        f.write(f"Mode: {args.mode}\n")
+        f.write(f"Test Name: {args.test_name}\n")
+        f.write(f"Model Name: {args.name}\n")
+        f.write("-" * 50 + "\n")
         f.write(f"总样本数: {metrics['total_samples']}\n")
         f.write(f"匹配成功样本数: {metrics['success_samples']}\n")
         f.write(f"匹配失败样本数: {metrics['failed_samples']}\n")
