@@ -1,0 +1,34 @@
+测试总结
+==================================================
+Train Script: train_onMultiGen_vessels_enhanced
+Test Name: test_1_octfa
+Model Name: 260306_1_v30_Multi_Hpatience
+Test Datasets: OCTFA
+
+--- Overall Metrics ---
+总样本数: 16
+匹配成功样本数: 13
+匹配失败样本数: 3
+匹配失败率: 0.1875
+Inaccurate 样本数: 3
+Acceptable 样本数: 10
+MSE (仅 Acceptable): 36.074341
+MACE (仅 Acceptable): 48.0486
+AUC@5: 0.1222
+AUC@10: 0.1861
+AUC@20: 0.2653
+mAUC: 0.2850
+Combined AUC: 0.1912
+Inverse MACE: 0.020388
+
+--- Per-Dataset Metrics ---
+
+OCTFA:
+  样本数: 16
+  AUC@5: 0.1222
+  AUC@10: 0.1861
+  AUC@20: 0.2653
+  mAUC: 0.2850
+  Combined AUC: 0.1912
+  MSE: 36.074341
+  MACE: 48.0486
