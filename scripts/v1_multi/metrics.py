@@ -255,7 +255,8 @@ def compute_homography_errors(data, config):
     计算单应矩阵估计误差 (针对 MultiModal 数据集)
     新增：返回 mae, mee 用于判断 inaccurate
     """
-    data.update({'R_errs': [], 't_errs': [], 'inliers': [], 'H_est': [], 'mae': [], 'mee': []})
+    data.update({'R_errs': [], 't_errs': [], 'inliers': [], 'H_est': [], 'mae': [], 'mee': [],
+                 'mse_list': [], 'mace_list': [], 'failed_mask': [], 'inaccurate_mask': []})
     
     m_bids = data['m_bids'].cpu().numpy()
     pts0 = data['mkpts0_f'].cpu().numpy()
@@ -277,6 +278,10 @@ def compute_homography_errors(data, config):
             data['H_est'].append(np.eye(3))
             data['mae'].append(np.inf)
             data['mee'].append(np.inf)
+            data['mse_list'].append(np.inf)
+            data['mace_list'].append(np.inf)
+            data['failed_mask'].append(True)
+            data['inaccurate_mask'].append(False)
             continue
             
         # 估计单应矩阵 (对应 plan.md 第四阶段: 几何估计)
@@ -306,6 +311,10 @@ def compute_homography_errors(data, config):
             data['H_est'].append(np.eye(3))
             data['mae'].append(np.inf)
             data['mee'].append(np.inf)
+            data['mse_list'].append(np.inf)
+            data['mace_list'].append(np.inf)
+            data['failed_mask'].append(True)
+            data['inaccurate_mask'].append(False)
         else:
             # 【调试】检查 inliers 数量和矩阵状态
             num_inliers = np.sum(inliers.ravel() > 0) if inliers is not None else 0
@@ -325,6 +334,10 @@ def compute_homography_errors(data, config):
                 data['H_est'].append(np.eye(3))
                 data['mae'].append(np.inf)
                 data['mee'].append(np.inf)
+                data['mse_list'].append(np.inf)
+                data['mace_list'].append(np.inf)
+                data['failed_mask'].append(True)
+                data['inaccurate_mask'].append(False)
             else:
                 if num_inliers < 30:
                     _dual_log("WARNING", f"⚠️ Batch {bs}: Inliers 数量较少 ({num_inliers}), 可能导致配准质量差")
@@ -345,19 +358,34 @@ def compute_homography_errors(data, config):
                 corners_est_h = (H_est @ corners_h.T).T
                 corners_est = corners_est_h[:, :2] / (corners_est_h[:, 2:] + 1e-7)
 
-                # 计算平均角点误差
+                # 计算平均角点误差 (MACE)
                 err = np.mean(np.linalg.norm(corners_est - corners_gt, axis=-1))
 
                 data['t_errs'].append(err)
                 data['inliers'].append(inliers.ravel() > 0)
                 data['H_est'].append(H_est)
 
-                # 计算点对点误差，用于判断 inaccurate
+                # 计算点对点误差，用于判断 inaccurate 和 MSE
                 pts0_batch = pts0[mask]
                 pts1_batch = pts1[mask]
-                mae, mee, _ = compute_pointwise_errors(pts0_batch, pts1_batch, H_est)
+                mae, mee, dis = compute_pointwise_errors(pts0_batch, pts1_batch, H_est)
                 data['mae'].append(mae)
                 data['mee'].append(mee)
+
+                # 计算 MSE（点对点投影误差的均方值）
+                mse_val = float(np.mean(dis ** 2)) if len(dis) > 0 else np.inf
+
+                # 根据 inaccurate 条件决定是否记录 MSE/MACE
+                if is_inaccurate(mae, mee):
+                    data['mse_list'].append(np.inf)
+                    data['mace_list'].append(np.inf)
+                    data['failed_mask'].append(False)
+                    data['inaccurate_mask'].append(True)
+                else:
+                    data['mse_list'].append(mse_val)
+                    data['mace_list'].append(float(err))
+                    data['failed_mask'].append(False)
+                    data['inaccurate_mask'].append(False)
 
 
 def compute_pointwise_errors(pts0, pts1, H_est):

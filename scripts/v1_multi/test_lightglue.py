@@ -1,5 +1,5 @@
 """
-SuperGlue 统一的测试脚本
+统一的测试脚本
 支持测试多种训练脚本的权重:
 - train_onGen.py (gen_cffa, gen_cfoct, gen_octfa, gen_mixed)
 - train_onMultiGen_vessels_enhanced.py
@@ -19,14 +19,14 @@ import pytorch_lightning as pl
 from torch.utils.data import ConcatDataset, DataLoader
 import csv
 
-# 添加父目录到 sys.path（必须在前，因为 superglue 是本地模块）
+# 添加父目录到 sys.path（必须在前，因为 lightglue 是本地模块）
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-# 导入 SuperGlue 预训练模型
-from models.superglue import SuperGlue
-from models.superpoint import SuperPoint
+# 导入 LightGlue 预训练模型
+from lightglue import LightGlue
+from lightglue.superpoint import SuperPoint
 
-from scripts.v1.metrics import (
+from scripts.v2.metrics import (
     compute_homography_errors,
     set_metrics_verbose,
     error_auc,
@@ -94,9 +94,6 @@ class RealDatasetWrapper(torch.utils.data.Dataset):
         fix_name = os.path.basename(fix_path)
         moving_name = os.path.basename(moving_path)
 
-        # SuperGlue 使用从 Fix 到 Moving 的变换
-        # 数据集内部计算的 T_0to1 是从 Moving 到 Fix 的变换
-        # 所以这里取逆
         try:
             T_fix_to_moving = torch.inverse(T_0to1)
         except:
@@ -126,7 +123,7 @@ class TestDataModule:
     def get_test_dataloader(self, datasets=None):
         """
         获取测试数据加载器
-        datasets: list of dataset names to include, e.g., ['CFFA', 'CFOCT', 'OCTFA', 'CFOCTA']
+        datasets: list of dataset names to include, e.g., ['CFFA', 'CFOCT', 'OCTFA']
                  if None, load all datasets
         """
         script_dir = Path(__file__).parent.parent.parent
@@ -373,6 +370,7 @@ def run_evaluation(pl_module, dataloader, config, verbose=True, save_visualizati
 def _visualize_batch(batch, outputs, output_dir, batch_idx):
     """可视化一个batch的结果"""
     import matplotlib.pyplot as plt
+    from lightglue import viz2d
 
     output_dir = Path(output_dir)
     batch_size = batch['image0'].shape[0]
@@ -437,28 +435,11 @@ def _visualize_batch(batch, outputs, output_dir, batch_idx):
                     pt = kpts1_np[idx1]
                     cv2.circle(img1_color, (int(pt[0]), int(pt[1])), 4, (0, 0, 255), -1)
 
-                # 绘制匹配连线
                 try:
-                    margin = 10
-                    h1, w1 = img0.shape[:2]
-                    h2, w2 = img1.shape[:2]
-                    H = max(h1, h2)
-                    W = w1 + w2 + margin
-
-                    out_img = np.zeros((H, W), dtype=np.uint8)
-                    out_img[:h1, :w1] = img0
-                    out_img[:h2, w1+margin:w1+margin+w2] = img1
-
                     fig = plt.figure(figsize=(12, 6))
-                    plt.imshow(out_img, cmap='gray')
-                    plt.axis('off')
-
+                    viz2d.plot_images([img0, img1])
                     if len(m_indices_0) > 0:
-                        pts0 = kpts0_np[m_indices_0]
-                        pts1 = kpts1_np[m_indices_1] + np.array([w1 + margin, 0])
-                        for p0, p1 in zip(pts0, pts1):
-                            plt.plot([p0[0], p1[0]], [p0[1], p1[1]], color='lime', lw=0.5)
-
+                        viz2d.plot_matches(kpts0_np[m_indices_0], kpts1_np[m_indices_1], color='lime', lw=0.5)
                     plt.savefig(str(save_path / "matches.png"), bbox_inches='tight', dpi=100)
                     plt.close(fig)
                 except Exception as e:
@@ -515,24 +496,24 @@ def get_train_script_config(train_script):
     """根据训练脚本名称返回对应的配置"""
     configs = {
         'train_onGen': {
-            'import_path': 'scripts.v1_multi.train_onGen',
-            'class_name': 'PL_SuperGlue_Gen',
-            'result_dir': 'superglue_gen_{train_mode}'
+            'import_path': 'scripts.v2_multi.train_onGen',
+            'class_name': 'PL_LightGlue_Gen',
+            'result_dir': 'lightglue_gen_{train_mode}'
         },
         'train_onMultiGen_vessels_enhanced': {
-            'import_path': 'scripts.v1_multi.train_onMultiGen_vessels_enhanced',
-            'class_name': 'PL_SuperGlue_Gen',
-            'result_dir': 'superglue_gen'
+            'import_path': 'scripts.v2_multi.train_onMultiGen_vessels_enhanced',
+            'class_name': 'PL_LightGlue_Gen',
+            'result_dir': 'lightglue_gen'
         },
         'train_onMultiGen_vessels': {
-            'import_path': 'scripts.v1_multi.train_onMultiGen_vessels',
-            'class_name': 'PL_SuperGlue_Gen',
-            'result_dir': 'superglue_gen'
+            'import_path': 'scripts.v2_multi.train_onMultiGen_vessels',
+            'class_name': 'PL_LightGlue_Gen',
+            'result_dir': 'lightglue_gen'
         },
         'train_onReal': {
-            'import_path': 'scripts.v1_multi.train_onReal',
-            'class_name': 'PL_SuperGlue_Real',
-            'result_dir': 'superglue_{train_mode}',
+            'import_path': 'scripts.v2_multi.train_onReal',
+            'class_name': 'PL_LightGlue_Real',
+            'result_dir': 'lightglue_{train_mode}',
             'use_train_mode': True
         }
     }
@@ -541,7 +522,7 @@ def get_train_script_config(train_script):
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description="SuperGlue 统一测试脚本")
+    parser = argparse.ArgumentParser(description="LightGlue 统一测试脚本")
 
     # 支持的训练脚本
     parser.add_argument('--train_script', '-s', type=str, required=True,
@@ -558,9 +539,9 @@ def parse_args():
     parser.add_argument('--test_datasets', '-d', type=str, default=None,
                         help='指定测试数据集，用逗号分隔，如 "CFFA,CFOCT,OCTFA,CFOCTA" 或 "CFFA"')
 
-    # Baseline 模式：使用 SuperGlue 原生预训练权重
+    # Baseline 模式：使用 LightGlue 原生预训练权重
     parser.add_argument('--baseline', action='store_true',
-                        help='使用 SuperGlue 原生预训练权重（不加载训练好的检查点）')
+                        help='使用 LightGlue 原生预训练权重（不加载训练好的检查点）')
 
     parser.add_argument('--name', '-n', type=str, required=True,
                         help='模型名称（用于定位结果目录）')
@@ -573,10 +554,6 @@ def parse_args():
     parser.add_argument('--gpus', type=str, default='0', help='GPU设备ID')
     parser.add_argument('--img_size', type=int, default=512, help='图像大小')
     parser.add_argument('--no_viz', action='store_true', help='禁用可视化')
-
-    # SuperPoint 预训练权重路径
-    parser.add_argument('--superpoint_pretrained', type=str, default=None,
-                        help='SuperPoint 预训练权重路径 (默认从 models/weights/ 加载)')
 
     return parser.parse_args()
 
@@ -605,16 +582,6 @@ def main():
     # 获取配置
     config = get_default_config()
     pl.seed_everything(config.TRAINER.SEED)
-
-    # 设置 SuperPoint 预训练权重路径
-    if args.superpoint_pretrained:
-        config.SUPERPOINT_PRETRAINED = args.superpoint_pretrained
-    else:
-        # 默认路径：检查 models/weights/superpoint_v1.pth
-        default_sp_path = Path(__file__).parent.parent / 'models' / 'weights' / 'superpoint_v1.pth'
-        if default_sp_path.exists():
-            config.SUPERPOINT_PRETRAINED = str(default_sp_path)
-            logger.info(f"使用默认 SuperPoint 预训练权重: {default_sp_path}")
 
     # 确定结果目录和checkpoint路径
     if args.train_script == 'train_onGen' or script_config.get('use_train_mode', False):
@@ -672,28 +639,26 @@ def main():
     # 从检查点加载模型 或 使用 baseline 预训练权重
     if args.baseline:
         logger.info("=" * 50)
-        logger.info("BASELINE 模式：使用 SuperGlue 原生预训练权重")
+        logger.info("BASELINE 模式：使用 LightGlue 原生预训练权重")
         logger.info("=" * 50)
 
         # 创建 baseline 模型包装类
-        class BaselineSuperGlueModel(pl.LightningModule):
-            """使用 SuperGlue 原生预训练权重的 baseline 模型"""
+        class BaselineLightGlueModel(pl.LightningModule):
+            """使用 LightGlue 原生预训练权重的 baseline 模型"""
             def __init__(self, config):
                 super().__init__()
                 self.config = config
 
                 # 1. 特征提取器 (SuperPoint) - 冻结，使用预训练
-                sp_config = config.SUPERPOINT.copy()
-                pretrained_path = config.SUPERPOINT_PRETRAINED
-                self.extractor = SuperPoint(sp_config, pretrained_path=pretrained_path).eval()
+                self.extractor = SuperPoint(max_num_keypoints=2048).eval()
                 for param in self.extractor.parameters():
                     param.requires_grad = False
 
-                # 2. 匹配器 (SuperGlue) - 使用预训练权重
-                sg_conf = config.SUPERGLUE.copy()
+                # 2. 匹配器 (LightGlue) - 使用预训练权重
+                lg_conf = config.MATCHING.copy()
                 # 强制加载预训练权重
-                sg_conf['weights'] = 'indoor'
-                self.matcher = SuperGlue(sg_conf).eval()
+                lg_conf['weights'] = 'superpoint_lightglue'
+                self.matcher = LightGlue(**lg_conf).eval()
                 for param in self.matcher.parameters():
                     param.requires_grad = False
 
@@ -707,73 +672,34 @@ def main():
                     if 'keypoints0' not in batch:
                         feats0 = self.extractor({'image': batch['image0']})
                         feats1 = self.extractor({'image': batch['image1']})
-
-                        # SuperPoint 返回的是 list，需转换
-                        def list_to_batch(feats):
-                            keys = feats['keypoints']
-                            descs = feats['descriptors']
-                            scs = feats['scores']
-
-                            lengths = [int(k.shape[0]) for k in keys]
-                            if len(lengths) == 0:
-                                raise ValueError('Empty SuperPoint features.')
-                            n_common = min(lengths)
-
-                            if n_common <= 0:
-                                device = keys[0].device if len(keys) > 0 else batch['image0'].device
-                                keypoints = torch.zeros((len(lengths), 0, 2), device=device, dtype=torch.float32)
-                                descriptors = torch.zeros((len(lengths), 256, 0), device=device, dtype=torch.float32)
-                                scores = torch.zeros((len(lengths), 0), device=device, dtype=torch.float32)
-                                return keypoints, descriptors, scores
-
-                            kpts_b, desc_b, scores_b = [], [], []
-                            for k, d, s in zip(keys, descs, scs):
-                                k = k.float()
-                                d = d.float()
-                                s = s.float()
-                                if k.shape[0] > n_common:
-                                    topk = torch.topk(s, k=n_common, dim=0, largest=True, sorted=False).indices
-                                    k = k[topk]
-                                    s = s[topk]
-                                    d = d[:, topk]
-                                kpts_b.append(k)
-                                desc_b.append(d)
-                                scores_b.append(s)
-
-                            keypoints = torch.stack(kpts_b, dim=0)
-                            descriptors = torch.stack(desc_b, dim=0)
-                            scores = torch.stack(scores_b, dim=0)
-                            return keypoints, descriptors, scores
-
-                        kpts0, desc0, sc0 = list_to_batch(feats0)
-                        kpts1, desc1, sc1 = list_to_batch(feats1)
-
                         batch.update({
-                            'keypoints0': kpts0,
-                            'descriptors0': desc0,
-                            'scores0': sc0,
-                            'keypoints1': kpts1,
-                            'descriptors1': desc1,
-                            'scores1': sc1
+                            'keypoints0': feats0['keypoints'],
+                            'descriptors0': feats0['descriptors'],
+                            'scores0': feats0['keypoint_scores'],
+                            'keypoints1': feats1['keypoints'],
+                            'descriptors1': feats1['descriptors'],
+                            'scores1': feats1['keypoint_scores']
                         })
 
-                # SuperGlue 匹配
+                # LightGlue 匹配
                 data = {
-                    'descriptors0': batch['descriptors0'],
-                    'descriptors1': batch['descriptors1'],
-                    'keypoints0': batch['keypoints0'],
-                    'keypoints1': batch['keypoints1'],
-                    'scores0': batch['scores0'],
-                    'scores1': batch['scores1'],
-                    'image0': batch['image0'],
-                    'image1': batch['image1']
+                    'image0': {
+                        'keypoints': batch['keypoints0'],
+                        'descriptors': batch['descriptors0'],
+                        'image': batch['image0']
+                    },
+                    'image1': {
+                        'keypoints': batch['keypoints1'],
+                        'descriptors': batch['descriptors1'],
+                        'image': batch['image1']
+                    }
                 }
 
                 return self.matcher(data)
 
-        model = BaselineSuperGlueModel(config)
+        model = BaselineLightGlueModel(config)
         model.eval()
-        logger.info("已加载 SuperGlue 原生预训练权重 (indoor)")
+        logger.info("已加载 LightGlue 原生预训练权重 (superpoint_lightglue)")
     else:
         logger.info(f"加载检查点: {ckpt_path}")
         model = pl_class.load_from_checkpoint(
