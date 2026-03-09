@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from models.superglue import SuperGlue
 from models.superpoint import SuperPoint
 
-from scripts.v1.metrics import (
+from scripts.v1_multi.metrics import (
     compute_homography_errors,
     set_metrics_verbose,
     error_auc,
@@ -191,8 +191,9 @@ def compute_metrics_for_dataset(evaluator, dataset_name):
 
 class UnifiedEvaluator:
     """统一的评估器，支持按数据集分别计算指标"""
-    def __init__(self, config=None):
+    def __init__(self, config=None, mode=None):
         self.config = config
+        self.mode = mode  # 'gen' | 'real' | None，供训练脚本区分生成/真实数据模式（可选）
         self.reset()
 
     def reset(self):

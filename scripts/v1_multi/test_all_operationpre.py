@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from models.superglue import SuperGlue
 from models.superpoint import SuperPoint
 
-from scripts.v1.metrics import (
+from scripts.v1_multi.metrics import (
     compute_homography_errors,
     set_metrics_verbose,
     error_auc,
@@ -107,26 +107,42 @@ class RealDatasetWrapper(torch.utils.data.Dataset):
 # ---------------------------------------------------------------------------
 
 def compute_metrics_for_dataset(evaluator, dataset_name):
-    if dataset_name in evaluator.per_dataset_errors and len(evaluator.per_dataset_errors[dataset_name]) > 0:
-        errors = evaluator.per_dataset_errors[dataset_name]
+    """AUC 使用全部样本（含 Failed/Inaccurate）；MSE/MACE 仅对 Acceptable 样本求平均。
+    若某模态上 Trained 的 Inaccurate 更多，则 AUC 可能低于 Baseline，而 MSE/MACE 仍可更优。"""
+    total = evaluator.per_dataset_samples.get(dataset_name, 0)
+    if total == 0:
+        return None
+
+    errors = evaluator.per_dataset_errors.get(dataset_name, [])
+    mses = evaluator.per_dataset_mses.get(dataset_name, [])
+    maces = evaluator.per_dataset_maces.get(dataset_name, [])
+    failed = evaluator.per_dataset_failed.get(dataset_name, 0)
+    inaccurate = evaluator.per_dataset_inaccurate.get(dataset_name, 0)
+    acceptable = evaluator.per_dataset_acceptable.get(dataset_name, 0)
+
+    if len(errors) > 0:
         auc_dict = error_auc(errors, [5, 10, 20])
         mauc_dict = compute_auc_rop(errors, limit=25)
+        combined = (auc_dict.get('auc@5', 0.0) + auc_dict.get('auc@10', 0.0) + auc_dict.get('auc@20', 0.0)) / 3.0
+    else:
+        auc_dict = {}
+        mauc_dict = {}
+        combined = 0.0
 
-        mses = evaluator.per_dataset_mses.get(dataset_name, [])
-        maces = evaluator.per_dataset_maces.get(dataset_name, [])
-
-        return {
-            'dataset': dataset_name,
-            'auc@5': auc_dict.get('auc@5', 0.0),
-            'auc@10': auc_dict.get('auc@10', 0.0),
-            'auc@20': auc_dict.get('auc@20', 0.0),
-            'mAUC': mauc_dict.get('mAUC', 0.0),
-            'combined_auc': (auc_dict.get('auc@5', 0.0) + auc_dict.get('auc@10', 0.0) + auc_dict.get('auc@20', 0.0)) / 3.0,
-            'mse': sum(mses) / len(mses) if mses else 0.0,
-            'mace': sum(maces) / len(maces) if maces else 0.0,
-            'num_samples': len(errors)
-        }
-    return None
+    return {
+        'dataset': dataset_name,
+        'auc@5': auc_dict.get('auc@5', 0.0),
+        'auc@10': auc_dict.get('auc@10', 0.0),
+        'auc@20': auc_dict.get('auc@20', 0.0),
+        'mAUC': mauc_dict.get('mAUC', 0.0),
+        'combined_auc': combined,
+        'mse': sum(mses) / len(mses) if mses else 0.0,
+        'mace': sum(maces) / len(maces) if maces else 0.0,
+        'num_samples': total,
+        'failed': failed,
+        'inaccurate': inaccurate,
+        'acceptable': acceptable,
+    }
 
 
 class UnifiedEvaluator:
@@ -147,6 +163,9 @@ class UnifiedEvaluator:
         self.per_dataset_mses = {}
         self.per_dataset_maces = {}
         self.per_dataset_samples = {}
+        self.per_dataset_failed = {}
+        self.per_dataset_inaccurate = {}
+        self.per_dataset_acceptable = {}
 
     def evaluate_batch(self, batch, outputs, pl_module):
         matches0 = outputs['matches0']
@@ -210,9 +229,21 @@ class UnifiedEvaluator:
                 self.per_dataset_mses[dataset] = []
                 self.per_dataset_maces[dataset] = []
                 self.per_dataset_samples[dataset] = 0
+                self.per_dataset_failed[dataset] = 0
+                self.per_dataset_inaccurate[dataset] = 0
+                self.per_dataset_acceptable[dataset] = 0
 
             self.per_dataset_samples[dataset] += 1
+            if b < len(failed_mask):
+                if failed_mask[b]:
+                    self.per_dataset_failed[dataset] += 1
+                elif inaccurate_mask[b]:
+                    self.per_dataset_inaccurate[dataset] += 1
+                else:
+                    self.per_dataset_acceptable[dataset] += 1
 
+            # 与 MACE/MSE 一致：仅当样本未 failed 且未 inaccurate 时才计入 AUC，避免“训练后 AUC 变差、MACE 变好”的假象
+            # AUC 包含所有样本：Failed = 1e6, Inaccurate = 真实误差, Success = 真实误差（与 metrics_cau_principle_0305.md 一致）
             if b < len(metrics_batch.get('t_errs', [])):
                 self.per_dataset_errors[dataset].append(metrics_batch['t_errs'][b])
 
@@ -579,9 +610,12 @@ def build_baseline_model(config):
 # ---------------------------------------------------------------------------
 
 DATASET_ORDER = ['CFFA', 'CFOCT', 'OCTFA']
-METRIC_COLS = ['num_samples', 'auc@5', 'auc@10', 'auc@20', 'mAUC', 'combined_auc', 'mse', 'mace']
+METRIC_COLS = ['num_samples', 'failed', 'inaccurate', 'acceptable', 'auc@5', 'auc@10', 'auc@20', 'mAUC', 'combined_auc', 'mse', 'mace']
 METRIC_FMT = {
     'num_samples': lambda v: str(int(v)),
+    'failed': lambda v: str(int(v)),
+    'inaccurate': lambda v: str(int(v)),
+    'acceptable': lambda v: str(int(v)),
     'auc@5': lambda v: f"{v:.4f}",
     'auc@10': lambda v: f"{v:.4f}",
     'auc@20': lambda v: f"{v:.4f}",
@@ -597,11 +631,14 @@ def save_summary_txt(output_dir, label, ds_metrics_map):
     with open(summary_path, "w") as f:
         f.write(f"测试总结 [{label}]\n")
         f.write("=" * 60 + "\n")
+        f.write("说明: AUC 使用全部样本(Failed=1e6+Inaccurate+Acceptable)；MSE/MACE 仅对 Acceptable 求平均。\n")
+        f.write("若某模态 Trained 的 Inaccurate 多于 Baseline，则可能出现 AUC 更低但 MSE/MACE 更优。\n")
+        f.write("-" * 60 + "\n")
         for ds in DATASET_ORDER:
             if ds not in ds_metrics_map:
                 continue
             m = ds_metrics_map[ds]
-            f.write(f"\n[{ds}] 样本数: {m['num_samples']}\n")
+            f.write(f"\n[{ds}] 样本数: {m['num_samples']} (Failed: {m.get('failed', 0)}, Inaccurate: {m.get('inaccurate', 0)}, Acceptable: {m.get('acceptable', 0)})\n")
             f.write(f"  AUC@5:        {m['auc@5']:.4f}\n")
             f.write(f"  AUC@10:       {m['auc@10']:.4f}\n")
             f.write(f"  AUC@20:       {m['auc@20']:.4f}\n")
@@ -647,6 +684,7 @@ def save_comparison_csv(output_dir, trained_metrics, baseline_metrics=None):
 
 
 def _print_comparison_table(trained_metrics, baseline_metrics=None):
+    logger.info("说明: AUC 含全部样本；MSE/MACE 仅 Acceptable。某模态若 Trained 的 Inaccurate 更多，则可能 AUC 更低但 MSE/MACE 更优。")
     header = f"{'Dataset':<8} {'Metric':<14} {'Trained':>12}"
     if baseline_metrics is not None:
         header += f" {'Baseline':>12}"

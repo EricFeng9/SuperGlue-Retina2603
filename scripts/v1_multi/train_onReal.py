@@ -32,8 +32,8 @@ from data.operation_pre_filtered_cffa.operation_pre_filtered_cffa_dataset import
 from data.operation_pre_filtered_cfoct.operation_pre_filtered_cfoct_dataset import CFOCTDataset
 from data.operation_pre_filtered_octfa.operation_pre_filtered_octfa_dataset import OCTFADataset
 
-# 导入统一的测试/验证模块
-from scripts.v1.test import UnifiedEvaluator
+# 导入统一的测试/验证模块（从 v1_multi 本地导入，避免引用 v1）
+from scripts.v1_multi.test import UnifiedEvaluator
 
 # ==========================================
 # 配置函数
@@ -244,21 +244,21 @@ class MultimodalDataModule(pl.LightningDataModule):
             val_dataset_list = []
             if 'CFFA' in val_datasets:
                 cffa_dir = script_dir / 'data' / 'operation_pre_filtered_cffa'
-                cffa_base = CFFADataset(root_dir=str(cffa_dir), split='val', mode='cf2fa')
+                cffa_base = CFFADataset(root_dir=str(cffa_dir), split='test', mode='cf2fa')
                 cffa_dataset = RealDatasetWrapper(cffa_base, split_name='test', dataset_name='CFFA')
                 logger.info(f"验证集加载 CFFA: {len(cffa_dataset)} 样本")
                 val_dataset_list.append(cffa_dataset)
 
             if 'CFOCT' in val_datasets:
                 cfoct_dir = script_dir / 'data' / 'operation_pre_filtered_cfoct'
-                cfoct_base = CFOCTDataset(root_dir=str(cfoct_dir), split='val', mode='cf2oct')
+                cfoct_base = CFOCTDataset(root_dir=str(cfoct_dir), split='test', mode='cf2oct')
                 cfoct_dataset = RealDatasetWrapper(cfoct_base, split_name='test', dataset_name='CFOCT')
                 logger.info(f"验证集加载 CFOCT: {len(cfoct_dataset)} 样本")
                 val_dataset_list.append(cfoct_dataset)
 
             if 'OCTFA' in val_datasets:
                 octfa_dir = script_dir / 'data' / 'operation_pre_filtered_octfa'
-                octfa_base = OCTFADataset(root_dir=str(octfa_dir), split='val', mode='fa2oct')
+                octfa_base = OCTFADataset(root_dir=str(octfa_dir), split='test', mode='fa2oct')
                 octfa_dataset = RealDatasetWrapper(octfa_base, split_name='test', dataset_name='OCTFA')
                 logger.info(f"验证集加载 OCTFA: {len(octfa_dataset)} 样本")
                 val_dataset_list.append(octfa_dataset)
@@ -649,7 +649,7 @@ class MultimodalValidationCallback(Callback):
                 for i in range(batch_size):
                     sample_split = splits[i] if isinstance(splits, list) else splits
 
-                    if sample_split == 'test':
+                    if sample_split in ('test', 'val'):
                         self._process_batch_sample(trainer, pl_module, batch, outputs, target_dir, i, batch_idx, sample_split)
                         visualized_count += 1
 

@@ -18,8 +18,8 @@ import random
 # 添加父目录到 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from scripts.v1.metrics import (
-    compute_homography_errors, 
+from scripts.v1_multi.metrics import (
+    compute_homography_errors,
     set_metrics_verbose,
     error_auc,
     compute_auc_rop
@@ -612,16 +612,16 @@ def main():
     
     # 导入必要的模块（根据mode动态导入）
     if args.mode == 'gen':
-        # 导入生成数据训练的模型
-        from scripts.v1.train_onGen_vessels import (
+        # 导入生成数据训练的模型（从 v1_multi 导入，避免引用 v1）
+        from scripts.v1_multi.train_onGen_vessels import (
             PL_SuperGlue_Gen,
             get_default_config
         )
         pl_class = PL_SuperGlue_Gen
         mode_dir = 'superglue_gen'
     else:  # real
-        # 导入真实数据训练的模型
-        from scripts.v1.train_onReal import (
+        # 导入真实数据训练的模型（从 v1_multi 导入，避免引用 v1）
+        from scripts.v1_multi.train_onReal import (
             PL_SuperGlue_Real,
             get_default_config
         )

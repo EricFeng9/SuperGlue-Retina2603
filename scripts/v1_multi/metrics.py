@@ -96,7 +96,9 @@ def compute_symmetrical_epipolar_errors(data):
         data (dict):{"epi_errs": [M]}
     """
     dataset_name = data['dataset_name'][0].lower()
-    if dataset_name == 'multimodal' or dataset_name == 'realdataset':
+    # 【修复】必须包含所有医学眼底数据集名称
+    multimodal_datasets = ['multimodal', 'realdataset', 'cffa', 'cfoct', 'octfa', 'cfocta']
+    if dataset_name in multimodal_datasets:
         return compute_homography_reprojection_errors(data)
     
     Tx = numeric.cross_product_matrix(data['T_0to1'][:, :3, 3])
@@ -188,12 +190,20 @@ def compute_pose_errors(data, config):
         }
     """
     dataset_name = data['dataset_name'][0].lower()
-    if dataset_name == 'multimodal' or dataset_name == 'realdataset':
+    # 【修复】必须包含所有医学眼底数据集名称
+    multimodal_datasets = ['multimodal', 'realdataset', 'cffa', 'cfoct', 'octfa', 'cfocta']
+    if dataset_name in multimodal_datasets:
         return compute_homography_errors(data, config)
     
     pixel_thr = config.TRAINER.RANSAC_PIXEL_THR  # 0.5
     conf = config.TRAINER.RANSAC_CONF  # 0.99999
-    data.update({'R_errs': [], 't_errs': [], 'inliers': []})
+    data.update({
+        'R_errs': [],
+        't_errs': [],
+        'inliers': [],
+        'failed_mask': [],
+        'inaccurate_mask': [],
+    })
 
     m_bids = data['m_bids'].cpu().numpy()
     pts0 = data['mkpts0_f'].cpu().numpy()
@@ -272,8 +282,9 @@ def compute_homography_errors(data, config):
         
         if num_matches < 4:
             _dual_log("WARNING", f"⚠️ Batch {bs}: 匹配点数不足 ({num_matches} < 4)")
-            data['R_errs'].append(np.inf)
-            data['t_errs'].append(np.inf)
+            # 【修复】Failed 样本：R_errs=0.0, t_errs=1e6（用于AUC计算）
+            data['R_errs'].append(0.0)
+            data['t_errs'].append(1e6)
             data['inliers'].append(np.array([]).astype(bool))
             data['H_est'].append(np.eye(3))
             data['mae'].append(np.inf)
@@ -305,8 +316,9 @@ def compute_homography_errors(data, config):
         if H_est is None:
             # 【调试】RANSAC 失败，记录原因
             _dual_log("WARNING", f"⚠️ Batch {bs}: RANSAC 返回 None (匹配点数: {len(bin_indices) if len(bin_indices) >= 4 else num_matches})")
-            data['R_errs'].append(np.inf)
-            data['t_errs'].append(np.inf)
+            # 【修复】Failed 样本：R_errs=0.0, t_errs=1e6（用于AUC计算）
+            data['R_errs'].append(0.0)
+            data['t_errs'].append(1e6)
             data['inliers'].append(np.array([]).astype(bool))
             data['H_est'].append(np.eye(3))
             data['mae'].append(np.inf)
@@ -318,18 +330,27 @@ def compute_homography_errors(data, config):
         else:
             # 【调试】检查 inliers 数量和矩阵状态
             num_inliers = np.sum(inliers.ravel() > 0) if inliers is not None else 0
+            # 【修复】添加 inliers_rate 检查，使用全部匹配点作为分母
+            denom_inliers = len(pts0_batch)
+            inliers_rate = num_inliers / max(1, int(denom_inliers))
             is_identity = np.allclose(H_est, np.eye(3), atol=1e-3)
-            
-            # 与 test_on_CrossModality.py 对齐：仅根据 inliers 判断是否失败
-            # 仅根据 inliers 判断是否失败
-            
-            _dual_log("INFO", f"✅ Batch {bs}: RANSAC 成功, inliers={num_inliers}/{len(bin_indices) if len(bin_indices) >= 4 else num_matches}")
-            
+
+            _dual_log("INFO", f"✅ Batch {bs}: RANSAC 成功, inliers={num_inliers}/{denom_inliers}, inliers_rate={inliers_rate:.2e}, H_est是否单位矩阵={is_identity}")
+
+            # 【修复】先检查 inliers_rate 是否小于 1e-6
+            is_failed = False
+            if inliers_rate < 1e-6:
+                _dual_log("WARNING", f"⚠️ Batch {bs}: inliers_rate < 1e-6，判定为 Failed")
+                is_failed = True
+
             if is_identity:
                 _dual_log("WARNING", f"⚠️ Batch {bs}: H_est 接近单位矩阵! 匹配失败")
+                is_failed = True
 
-                data['R_errs'].append(np.inf)
-                data['t_errs'].append(np.inf)
+            if is_failed:
+                # 【修复】Failed 样本：R_errs=0.0, t_errs=1e6（用于AUC计算）
+                data['R_errs'].append(0.0)
+                data['t_errs'].append(1e6)
                 data['inliers'].append(np.array([]).astype(bool))
                 data['H_est'].append(np.eye(3))
                 data['mae'].append(np.inf)
@@ -347,7 +368,7 @@ def compute_homography_errors(data, config):
 
                 # 重要修复：计算 Corner Error (估计 H 与 真值 H 之间的偏差)
                 h, w = data['image0'].shape[2:]
-                corners = np.array([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]], dtype=np.float32)
+                corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
                 corners_h = np.concatenate([corners, np.ones((4, 1))], axis=-1)
 
                 # 使用真值 H 投影得到 GT 坐标
@@ -375,7 +396,7 @@ def compute_homography_errors(data, config):
                 # 计算 MSE（点对点投影误差的均方值）
                 mse_val = float(np.mean(dis ** 2)) if len(dis) > 0 else np.inf
 
-                # 根据 inaccurate 条件决定是否记录 MSE/MACE
+                # 根据 inaccurate 条件决定是否记录 MSE/MACE（t_errs 已在上方按真实误差记录，参与 AUC）
                 if is_inaccurate(mae, mee):
                     data['mse_list'].append(np.inf)
                     data['mace_list'].append(np.inf)

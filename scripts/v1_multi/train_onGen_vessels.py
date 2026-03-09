@@ -41,7 +41,7 @@ MultiModalDataset = multimodal_dataset_module.MultiModalDataset
 from data.operation_pre_filtered_cffa.operation_pre_filtered_cffa_dataset import CFFADataset
 
 # 导入统一的测试/验证模块
-from scripts.v1.test import UnifiedEvaluator
+from scripts.v1_multi.test import UnifiedEvaluator
 
 # ==========================================
 # 配置函数
