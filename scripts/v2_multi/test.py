@@ -23,12 +23,12 @@ import csv
 # 添加父目录到 sys.path
 # 先添加项目根目录，以便导入 dataset 模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
-# 再添加 LightGlue 目录，以便导入 lightglue 模块
+# 再添加 SuperGlue 目录，以便导入 superglue 模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-# 导入 LightGlue 预训练模型
-from lightglue import LightGlue
-from lightglue.superpoint import SuperPoint
+# 导入 SuperGlue 预训练模型
+from models.superpoint import SuperPoint
+from models.superglue import SuperGlue
 
 # 导入 metrics（使用 v2_multi 版本的 metrics，与训练保持一致）
 from scripts.v2_multi.metrics import (
@@ -187,32 +187,33 @@ class TestDataModule:
         seed: 随机种子，用于确保数据加载顺序可复现（仅用于设置PyTorch等，其他随机操作由数据集自行管理）
         """
         import torch
-        script_dir = Path(__file__).parent.parent.parent
+        # 使用硬编码绝对路径
+        script_dir = Path('/data/student/Fengjunming/diffusion_registration')
         val_dataset_list = []
 
         if datasets is None or 'CFFA' in datasets:
-            cffa_dir = script_dir.parent / 'dataset' / 'CFFA'
+            cffa_dir = script_dir / 'dataset' / 'CFFA'
             cffa_base = CFFADataset(root_dir=str(cffa_dir), split='all', mode='fa2cf')
             cffa_dataset = RealDatasetWrapper(cffa_base, split_name='test', dataset_name='CFFA')
             logger.info(f"加载 CFFA 测试集 (全部数据): {len(cffa_dataset)} 样本")
             val_dataset_list.append(cffa_dataset)
 
         if datasets is None or 'CFOCT' in datasets:
-            cfoct_dir = script_dir.parent / 'dataset' / 'CF_OCT'
+            cfoct_dir = script_dir / 'dataset' / 'CF_OCT'
             cfoct_base = CFOCTDataset(root_dir=str(cfoct_dir), split='all', mode='oct2cf')
             cfoct_dataset = RealDatasetWrapper(cfoct_base, split_name='test', dataset_name='CFOCT')
             logger.info(f"加载 CFOCT 测试集 (全部数据): {len(cfoct_dataset)} 样本")
             val_dataset_list.append(cfoct_dataset)
 
         if datasets is None or 'OCTFA' in datasets:
-            octfa_dir = script_dir.parent / 'dataset' / 'operation_pre_filtered_octfa'
+            octfa_dir = script_dir / 'dataset' / 'operation_pre_filtered_octfa'
             octfa_base = OCTFADataset(root_dir=str(octfa_dir), split='val', mode='fa2oct')
             octfa_dataset = RealDatasetWrapper(octfa_base, split_name='test', dataset_name='OCTFA')
             logger.info(f"加载 OCTFA 测试集: {len(octfa_dataset)} 样本")
             val_dataset_list.append(octfa_dataset)
 
         if datasets is None or 'CFOCTA' in datasets:
-            cfocta_dir = script_dir.parent / 'dataset' / 'CF_OCTA_v2_repaired'
+            cfocta_dir = script_dir / 'dataset' / 'CF_OCTA_v2_repaired'
             cfocta_base = CFOCTADataset(root_dir=str(cfocta_dir), split='val', mode='octa2cf')
             cfocta_dataset = RealDatasetWrapper(cfocta_base, split_name='test', dataset_name='CFOCTA')
             logger.info(f"加载 CFOCTA 测试集: {len(cfocta_dataset)} 样本")
@@ -526,12 +527,16 @@ def _visualize_batch(batch, outputs, output_dir, batch_idx, sample_counter=0):
                 try:
                     fig = plt.figure(figsize=(12, 6))
                     viz2d.plot_images([img0, img1])
-                    if len(m_indices_0) > 0:
+                    if len(m_indices_0) > 0 and len(m_indices_1) > 0:
                         viz2d.plot_matches(kpts0_np[m_indices_0], kpts1_np[m_indices_1], color='lime', lw=0.5)
                     plt.savefig(str(save_path / "matches.png"), bbox_inches='tight', dpi=100)
-                    plt.close(fig)
+                    plt.close('all')
                 except Exception as e:
                     logger.warning(f"绘制匹配图失败: {e}")
+                    try:
+                        plt.close('all')
+                    except:
+                        pass
 
         cv2.imwrite(str(save_path / "fix_with_kpts.png"), img0_color)
         cv2.imwrite(str(save_path / "moving_with_kpts.png"), img1_color)
@@ -589,28 +594,28 @@ def get_train_script_config(train_script):
         'train_onGen': {
             'import_path': 'scripts.v2_multi.train_onGen',
             'class_name': 'PL_LightGlue_Gen',
-            'result_dir': 'lightglue_gen_{train_mode}'
+            'result_dir': 'superglue_gen_{train_mode}'
         },
         'train_onMultiGen_vessels_enhanced': {
             'import_path': 'scripts.v2_multi.train_onMultiGen_vessels_enhanced',
             'class_name': 'PL_LightGlue_Gen',
-            'result_dir': 'lightglue_gen'
+            'result_dir': 'superglue_gen'
         },
         'train_onMultiGen_vessels': {
             'import_path': 'scripts.v2_multi.train_onMultiGen_vessels',
             'class_name': 'PL_LightGlue_Gen',
-            'result_dir': 'lightglue_gen'
+            'result_dir': 'superglue_gen'
         },
         'train_onGen_vessels_enhanced': {
             'import_path': 'scripts.v2_multi.train_onGen_vessels_enhanced',
             'class_name': 'PL_LightGlue_Gen',
-            'result_dir': 'lightglue_gen_{train_mode}',
+            'result_dir': 'superglue_gen_{train_mode}',
             'use_train_mode': True
         },
         'train_onReal': {
             'import_path': 'scripts.v2_multi.train_onReal',
             'class_name': 'PL_LightGlue_Real',
-            'result_dir': 'lightglue_{train_mode}',
+            'result_dir': 'superglue_{train_mode}',
             'use_train_mode': True
         }
     }
@@ -710,7 +715,7 @@ def main():
     if args.checkpoint:
         ckpt_path = Path(args.checkpoint)
     else:
-        ckpt_path = Path(f"results/{mode_dir}/{args.name}/best_checkpoint/model.ckpt")
+        ckpt_path = Path(f"/data/student/Fengjunming/diffusion_registration/SuperGluePretrainedNetwork/results/{mode_dir}/{args.name}/best_checkpoint/model.ckpt")
 
     if not ckpt_path.exists():
         logger.error(f"检查点不存在: {ckpt_path}")
@@ -720,7 +725,7 @@ def main():
     logger.info(f"加载检查点: {ckpt_path}")
 
     # 设置输出目录
-    output_dir = Path(f"results/{mode_dir}/{args.name}/{args.test_name}")
+    output_dir = Path(f"/data/student/Fengjunming/diffusion_registration/SuperGluePretrainedNetwork/results/{mode_dir}/{args.name}/{args.test_name}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 配置日志
@@ -761,63 +766,122 @@ def main():
         logger.info("=" * 50)
 
         # 创建 baseline 模型包装类
-        class BaselineLightGlueModel(pl.LightningModule):
-            """使用 LightGlue 原生预训练权重的 baseline 模型"""
+        class BaselineSuperGlueModel(pl.LightningModule):
+            """使用 SuperGlue 原生预训练权重的 baseline 模型"""
             def __init__(self, config):
                 super().__init__()
                 self.config = config
 
-                # 1. 特征提取器 (SuperPoint) - 冻结，使用预训练
-                self.extractor = SuperPoint(max_num_keypoints=2048).eval()
+                # 1. 特征提取器 (SuperPoint) - 冻结
+                self.extractor = SuperPoint({
+                    'descriptor_dim': 256,
+                    'nms_radius': 4,
+                    'keypoint_threshold': 0.005,
+                    'max_keypoints': 2048,
+                    'remove_borders': 4,
+                }).eval()
                 for param in self.extractor.parameters():
                     param.requires_grad = False
 
-                # 2. 匹配器 (LightGlue) - 使用预训练权重
-                lg_conf = config.MATCHING.copy()
-                # 强制加载预训练权重
-                lg_conf['weights'] = 'superpoint_lightglue'
-                self.matcher = LightGlue(**lg_conf).eval()
+                # 2. 匹配器 (SuperGlue) - 使用预训练权重
+                self.matcher = SuperGlue({
+                    'descriptor_dim': 256,
+                    'weights': 'indoor',
+                    'keypoint_encoder': [32, 64, 128, 256],
+                    'GNN_layers': ['self', 'cross'] * 9,
+                    'sinkhorn_iterations': 100,
+                    'match_threshold': 0.2,
+                }).eval()
                 for param in self.matcher.parameters():
                     param.requires_grad = False
 
                 # 使用统一的评估器
                 self.evaluator = UnifiedEvaluator(config=config)
 
+            def _extract_features(self, batch):
+                """提取SuperPoint特征，将list转换为batch tensor"""
+                image0 = batch['image0']
+                image1 = batch['image1']
+                
+                B = image0.shape[0]
+                
+                # 提取特征 (SuperPoint 返回 list 格式)
+                feats0_list = self.extractor({'image': image0})
+                feats1_list = self.extractor({'image': image1})
+                
+                # 转换为 batch tensor 格式 (SuperGlue 需要)
+                keypoints0 = []
+                scores0 = []
+                descriptors0 = []
+                keypoints1 = []
+                scores1 = []
+                descriptors1 = []
+                
+                for b in range(B):
+                    keypoints0.append(feats0_list['keypoints'][b])
+                    scores0.append(feats0_list['scores'][b])
+                    descriptors0.append(feats0_list['descriptors'][b])
+                    
+                    keypoints1.append(feats1_list['keypoints'][b])
+                    scores1.append(feats1_list['scores'][b])
+                    descriptors1.append(feats1_list['descriptors'][b])
+                
+                max_kpts0 = max(k.shape[0] for k in keypoints0) if keypoints0 else 0
+                max_kpts1 = max(k.shape[0] for k in keypoints1) if keypoints1 else 0
+                
+                keypoints0_batch = torch.zeros(B, max(1, max_kpts0), 2, device=image0.device)
+                keypoints1_batch = torch.zeros(B, max(1, max_kpts1), 2, device=image0.device)
+                scores0_batch = torch.zeros(B, max(1, max_kpts0), device=image0.device)
+                scores1_batch = torch.zeros(B, max(1, max_kpts1), device=image0.device)
+                descriptors0_batch = torch.zeros(B, 256, max(1, max_kpts0), device=image0.device)
+                descriptors1_batch = torch.zeros(B, 256, max(1, max_kpts1), device=image0.device)
+                
+                for b in range(B):
+                    n0 = keypoints0[b].shape[0]
+                    n1 = keypoints1[b].shape[0]
+                    
+                    if n0 > 0:
+                        keypoints0_batch[b, :n0] = keypoints0[b]
+                        scores0_batch[b, :n0] = scores0[b]
+                        descriptors0_batch[b, :, :n0] = descriptors0[b]
+                    
+                    if n1 > 0:
+                        keypoints1_batch[b, :n1] = keypoints1[b]
+                        scores1_batch[b, :n1] = scores1[b]
+                        descriptors1_batch[b, :, :n1] = descriptors1[b]
+                
+                return {
+                    'keypoints0': keypoints0_batch,
+                    'keypoints1': keypoints1_batch,
+                    'scores0': scores0_batch,
+                    'scores1': scores1_batch,
+                    'descriptors0': descriptors0_batch,
+                    'descriptors1': descriptors1_batch,
+                }
+
             def forward(self, batch):
                 """前向传播"""
                 # 提取特征
                 with torch.no_grad():
-                    if 'keypoints0' not in batch:
-                        feats0 = self.extractor({'image': batch['image0']})
-                        feats1 = self.extractor({'image': batch['image1']})
-                        batch.update({
-                            'keypoints0': feats0['keypoints'],
-                            'descriptors0': feats0['descriptors'],
-                            'scores0': feats0['keypoint_scores'],
-                            'keypoints1': feats1['keypoints'],
-                            'descriptors1': feats1['descriptors'],
-                            'scores1': feats1['keypoint_scores']
-                        })
-
-                # LightGlue 匹配
+                    feats = self._extract_features(batch)
+                
+                # SuperGlue 匹配
                 data = {
-                    'image0': {
-                        'keypoints': batch['keypoints0'],
-                        'descriptors': batch['descriptors0'],
-                        'image': batch['image0']
-                    },
-                    'image1': {
-                        'keypoints': batch['keypoints1'],
-                        'descriptors': batch['descriptors1'],
-                        'image': batch['image1']
-                    }
+                    'image0': batch['image0'],
+                    'image1': batch['image1'],
+                    'keypoints0': feats['keypoints0'],
+                    'keypoints1': feats['keypoints1'],
+                    'scores0': feats['scores0'],
+                    'scores1': feats['scores1'],
+                    'descriptors0': feats['descriptors0'],
+                    'descriptors1': feats['descriptors1'],
                 }
 
                 return self.matcher(data)
 
-        model = BaselineLightGlueModel(config)
+        model = BaselineSuperGlueModel(config)
         model.eval()
-        logger.info("已加载 LightGlue 原生预训练权重 (superpoint_lightglue)")
+        logger.info("已加载 SuperGlue 原生预训练权重 (indoor)")
     else:
         logger.info(f"加载检查点: {ckpt_path}")
         model = pl_class.load_from_checkpoint(

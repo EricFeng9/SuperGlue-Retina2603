@@ -22,14 +22,15 @@ import logging
 from types import SimpleNamespace
 
 # 添加父目录到 sys.path 以支持导入
-# 先添加 LightGlue 目录，以便导入 lightglue 模块
+# 先添加 SuperGlue 目录，以便导入 superglue 模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 # 再添加项目根目录，以便导入 dataset 模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 
-# 导入 LightGlue 相关模块
-from lightglue import LightGlue, SuperPoint
-from lightglue import viz2d
+# 导入 SuperGlue 相关模块
+from models.superpoint import SuperPoint
+from models.superglue import SuperGlue
+from models import matching
 
 # 导入生成数据集 (260311_multiGen_aug)
 # 注意：由于文件夹名包含点号，需要使用 importlib 动态导入
@@ -68,14 +69,27 @@ def get_default_config():
     conf.TRAINER.PATIENCE = 10  # 默认 patience 值
     
     conf.MATCHING = {
-        'features': 'superpoint',
-        'input_dim': 256,
-        'descriptor_dim': 256,
-        'depth_confidence': -1,  # 训练时禁用早停
-        'width_confidence': -1,
-        'filter_threshold': 0.1,
-        'flash': False
+        'superpoint': {
+            'descriptor_dim': 256,
+            'nms_radius': 4,
+            'keypoint_threshold': 0.005,
+            'max_keypoints': 2048,
+            'remove_borders': 4,
+        },
+        'superglue': {
+            'descriptor_dim': 256,
+            'weights': 'indoor',
+            'keypoint_encoder': [32, 64, 128, 256],
+            'GNN_layers': ['self', 'cross'] * 9,
+            'sinkhorn_iterations': 100,
+            'match_threshold': 0.2,
+        },
     }
+    
+    # SuperPoint 预训练权重路径
+    conf.SUPERPOINT_PRETRAINED = None  # None 表示从默认路径加载（如果不存在会自动下载）
+    # SuperGlue 预训练权重路径
+    conf.SUPERGLUE_PRETRAINED = None  # None 表示从默认路径加载 indoor/outdoor 权重
     return conf
 
 # ==========================================
@@ -321,7 +335,7 @@ class RealDatasetWrapper(torch.utils.data.Dataset):
         moving_name = os.path.basename(moving_path)
         
         # 数据集内部计算的 T_0to1 是从 Moving 到 Fix 的变换
-        # 但 LightGlue 默认输出是从 Image0(Fix) -> Image1(Moving) 的变换
+        # 但 SuperGlue 默认输出是从 Image0(Fix) -> Image1(Moving) 的变换
         # 所以这里取逆
         try:
             T_fix_to_moving = torch.inverse(T_0to1)
@@ -355,11 +369,11 @@ class MultimodalDataModule(pl.LightningDataModule):
         if stage == 'fit' or stage is None:
             # 训练集使用生成数据 (260311_multiGen_aug) 的全量数据（train + val）
             # 验证集使用全量真实数据进行验证
-            script_dir = Path(__file__).parent.parent.parent
+            # 使用硬编码绝对路径
+            script_dir = Path('/data/student/Fengjunming/diffusion_registration')
 
             # 训练集：生成数据 (260311_multiGen_aug) 全量数据 - 支持 cf, fa, oct 随机两两配对
-            # 数据在 /data/student/Fengjunming/diffusion_registration/dataset/260311_multiGen_aug
-            train_data_dir = script_dir / '../dataset' / '260311_multiGen_aug'
+            train_data_dir = script_dir / 'dataset' / '260311_multiGen_aug'
 
             # 加载 train split
             train_base = MultiModalDataset(
@@ -384,23 +398,21 @@ class MultimodalDataModule(pl.LightningDataModule):
             self.train_dataset = ConcatDataset([train_dataset, val_dataset])
             logger.info(f"训练集总样本数 (train + val): {len(self.train_dataset)}")
             
-            # 验证集：使用全量真实数据（与 train_onGen_vessels_enhanced.py 一致）
-            # CFFA 和 CFOCT 使用全量数据（split='all'）
-            
-            # 1) CFFA 全量数据集 (来自 dataset/CFFA)
-            cffa_dir = script_dir.parent / 'dataset' / 'CFFA'
+            # 验证集：使用全量真实数据
+            # 1) CFFA 全量数据集
+            cffa_dir = script_dir / 'dataset' / 'CFFA'
             cffa_base = CFFADataset(root_dir=str(cffa_dir), split='all', mode='fa2cf')
             cffa_dataset = RealDatasetWrapper(cffa_base, split_name='all', dataset_name='CFFA')
             logger.info(f"验证集加载 CFFA 全量集: {len(cffa_dataset)} 样本")
             
-            # 2) CFOCT 全量数据集 (来自 dataset/CF_OCT)
-            cfoct_dir = script_dir.parent / 'dataset' / 'CF_OCT'
+            # 2) CFOCT 全量数据集
+            cfoct_dir = script_dir / 'dataset' / 'CF_OCT'
             cfoct_base = CFOCTDataset(root_dir=str(cfoct_dir), split='all', mode='oct2cf')
             cfoct_dataset = RealDatasetWrapper(cfoct_base, split_name='all', dataset_name='CFOCT')
             logger.info(f"验证集加载 CFOCT 全量集: {len(cfoct_dataset)} 样本")
             
-            # 3) OCTFA val 集 (来自 dataset/operation_pre_filtered_octfa)
-            octfa_dir = script_dir.parent / 'dataset' / 'operation_pre_filtered_octfa'
+            # 3) OCTFA val 集
+            octfa_dir = script_dir / 'dataset' / 'operation_pre_filtered_octfa'
             octfa_base = OCTFADataset(root_dir=str(octfa_dir), split='val', mode='fa2oct')
             octfa_dataset = RealDatasetWrapper(octfa_base, split_name='val', dataset_name='OCTFA')
             logger.info(f"验证集加载 OCTFA val 集: {len(octfa_dataset)} 样本")
@@ -418,24 +430,27 @@ class MultimodalDataModule(pl.LightningDataModule):
         )
 
 # ==========================================
-# 核心模型: PL_LightGlue_Gen
+# 核心模型: PL_SuperGlue_Gen
 # ==========================================
-class PL_LightGlue_Gen(pl.LightningModule):
-    """LightGlue 的 PyTorch Lightning 封装（用于生成数据训练）"""
+class PL_SuperGlue_Gen(pl.LightningModule):
+    """SuperGlue 的 PyTorch Lightning 封装（用于生成数据训练）"""
     def __init__(self, config, result_dir=None):
         super().__init__()
         self.config = config
         self.result_dir = result_dir
         self.save_hyperparameters({'config': str(config)})
         
-        # 1. 特征提取器 (SuperPoint) - 冻结
-        self.extractor = SuperPoint(max_num_keypoints=2048).eval()
+        # 1. 特征提取器 (SuperPoint) - 冻结，使用预训练权重
+        sp_config = config.MATCHING.get('superpoint', {})
+        pretrained_path = getattr(config, 'SUPERPOINT_PRETRAINED', None)
+        self.extractor = SuperPoint(sp_config, pretrained_path=pretrained_path).eval()
         for param in self.extractor.parameters():
             param.requires_grad = False
             
-        # 2. 匹配器 (LightGlue) - 可训练
-        lg_conf = config.MATCHING.copy()
-        self.matcher = LightGlue(**lg_conf)
+        # 2. 匹配器 (SuperGlue) - 可训练，加载预训练权重
+        sg_config = config.MATCHING.get('superglue', {})
+        superglue_pretrained_path = getattr(config, 'SUPERGLUE_PRETRAINED', None)
+        self.matcher = SuperGlue(sg_config, pretrained_path=superglue_pretrained_path)
         
         # 用于控制是否强制可视化
         self.force_viz = False
@@ -468,111 +483,272 @@ class PL_LightGlue_Gen(pl.LightningModule):
             },
         }
 
+    def _extract_features(self, batch):
+        """提取SuperPoint特征，将list转换为batch tensor"""
+        image0 = batch['image0']
+        image1 = batch['image1']
+        
+        B = image0.shape[0]
+        
+        # 提取特征 (SuperPoint 返回 list 格式)
+        feats0_list = self.extractor({'image': image0})
+        feats1_list = self.extractor({'image': image1})
+        
+        # 转换为 batch tensor 格式 (SuperGlue 需要)
+        keypoints0 = []
+        scores0 = []
+        descriptors0 = []
+        keypoints1 = []
+        scores1 = []
+        descriptors1 = []
+        
+        for b in range(B):
+            # image0
+            keypoints0.append(feats0_list['keypoints'][b])
+            scores0.append(feats0_list['scores'][b])
+            descriptors0.append(feats0_list['descriptors'][b])
+            
+            # image1
+            keypoints1.append(feats1_list['keypoints'][b])
+            scores1.append(feats1_list['scores'][b])
+            descriptors1.append(feats1_list['descriptors'][b])
+        
+        # 填充到相同长度并转换为 batch tensor
+        max_kpts0 = max(k.shape[0] for k in keypoints0) if keypoints0 else 0
+        max_kpts1 = max(k.shape[0] for k in keypoints1) if keypoints1 else 0
+        
+        # 填充 keypoints
+        keypoints0_batch = torch.zeros(B, max(1, max_kpts0), 2, device=image0.device)
+        keypoints1_batch = torch.zeros(B, max(1, max_kpts1), 2, device=image0.device)
+        scores0_batch = torch.zeros(B, max(1, max_kpts0), device=image0.device)
+        scores1_batch = torch.zeros(B, max(1, max_kpts1), device=image0.device)
+        descriptors0_batch = torch.zeros(B, 256, max(1, max_kpts0), device=image0.device)
+        descriptors1_batch = torch.zeros(B, 256, max(1, max_kpts1), device=image0.device)
+        
+        valid_mask0 = torch.zeros(B, max(1, max_kpts0), dtype=torch.bool, device=image0.device)
+        valid_mask1 = torch.zeros(B, max(1, max_kpts1), dtype=torch.bool, device=image0.device)
+        
+        for b in range(B):
+            n0 = keypoints0[b].shape[0]
+            n1 = keypoints1[b].shape[0]
+            
+            if n0 > 0:
+                keypoints0_batch[b, :n0] = keypoints0[b]
+                scores0_batch[b, :n0] = scores0[b]
+                descriptors0_batch[b, :, :n0] = descriptors0[b]
+                valid_mask0[b, :n0] = True
+            
+            if n1 > 0:
+                keypoints1_batch[b, :n1] = keypoints1[b]
+                scores1_batch[b, :n1] = scores1[b]
+                descriptors1_batch[b, :, :n1] = descriptors1[b]
+                valid_mask1[b, :n1] = True
+        
+        return {
+            'keypoints0': keypoints0_batch,
+            'keypoints1': keypoints1_batch,
+            'scores0': scores0_batch,
+            'scores1': scores1_batch,
+            'descriptors0': descriptors0_batch,
+            'descriptors1': descriptors1_batch,
+            'valid_mask0': valid_mask0,
+            'valid_mask1': valid_mask1,
+        }
+
     def forward(self, batch):
         """前向传播"""
         # 提取特征
         with torch.no_grad():
-            if 'keypoints0' not in batch:
-                feats0 = self.extractor({'image': batch['image0']})
-                feats1 = self.extractor({'image': batch['image1']})
-                batch.update({
-                    'keypoints0': feats0['keypoints'], 
-                    'descriptors0': feats0['descriptors'], 
-                    'scores0': feats0['keypoint_scores'],
-                    'keypoints1': feats1['keypoints'], 
-                    'descriptors1': feats1['descriptors'], 
-                    'scores1': feats1['keypoint_scores']
-                })
+            feats = self._extract_features(batch)
+            
+            # 筛选有效关键点
+            keypoints0 = feats['keypoints0']
+            keypoints1 = feats['keypoints1']
+            scores0 = feats['scores0']
+            scores1 = feats['scores1']
+            descriptors0 = feats['descriptors0']
+            descriptors1 = feats['descriptors1']
         
-        # LightGlue 匹配
+        # SuperGlue 匹配
         data = {
-            'image0': {
-                'keypoints': batch['keypoints0'],
-                'descriptors': batch['descriptors0'],
-                'image': batch['image0']
-            },
-            'image1': {
-                'keypoints': batch['keypoints1'],
-                'descriptors': batch['descriptors1'],
-                'image': batch['image1']
-            }
+            'image0': batch['image0'],
+            'image1': batch['image1'],
+            'keypoints0': keypoints0,
+            'keypoints1': keypoints1,
+            'scores0': scores0,
+            'scores1': scores1,
+            'descriptors0': descriptors0,
+            'descriptors1': descriptors1,
         }
         
-        return self.matcher(data)
+        # 返回 SuperGlue 的输出 (包含 matches0)
+        # 传递 return_scores=True 以获取用于训练的完整 Sinkhorn 输出
+        outputs = self.matcher(data, return_scores=True)
+        
+        # 添加 keypoints 到输出以便计算损失
+        outputs['keypoints0'] = keypoints0
+        outputs['keypoints1'] = keypoints1
+        
+        return outputs
 
     def _compute_gt_matches(self, kpts0, kpts1, T_0to1, dist_th=3.0):
         """计算几何 Ground Truth 匹配对"""
-        B, M, _ = kpts0.shape
-        B, N, _ = kpts1.shape
-        device = kpts0.device
+        # kpts0, kpts1: [B, N, 2] 或 list of [N, 2]
+        # T_0to1: [B, 3, 3] 从 image0 到 image1 的变换
         
-        # 将 kpts0 变换到 image1 的坐标系
-        kpts0_h = torch.cat([kpts0, torch.ones(B, M, 1, device=device)], dim=-1)
-        kpts0_warped_h = torch.matmul(kpts0_h, T_0to1.transpose(1, 2))
-        kpts0_warped = kpts0_warped_h[..., :2] / (kpts0_warped_h[..., 2:] + 1e-8)
+        B = T_0to1.shape[0]
+        device = T_0to1.device
         
-        # 计算距离矩阵
-        dist = torch.cdist(kpts0_warped, kpts1)
+        # 如果是关键点列表，转为 tensor
+        if isinstance(kpts0, list):
+            kpts0_tensors = []
+            kpts1_tensors = []
+            for b in range(B):
+                kp0 = kpts0[b] if kpts0[b].shape[0] > 0 else torch.zeros(0, 2, device=device)
+                kp1 = kpts1[b] if kpts1[b].shape[0] > 0 else torch.zeros(0, 2, device=device)
+                kpts0_tensors.append(kp0)
+                kpts1_tensors.append(kp1)
+            kpts0 = torch.stack(kpts0_tensors) if all(k.shape[0] > 0 for k in kpts0_tensors) else None
+            kpts1 = torch.stack(kpts1_tensors) if all(k.shape[0] > 0 for k in kpts1_tensors) else None
         
-        # 寻找最近邻
-        min_dist, matched_indices = torch.min(dist, dim=-1)
+        if kpts0 is None or kpts1 is None:
+            return None, None
+            
+        # 将关键点转换为齐次坐标并应用变换
+        # kpts0: [B, N, 2] -> [B, N, 3]
+        ones = torch.ones(B, kpts0.shape[1], 1, device=device)
+        kpts0_homo = torch.cat([kpts0, ones], dim=-1)  # [B, N, 3]
         
-        # 根据阈值过滤
-        mask = min_dist < dist_th
-        matches_gt = torch.where(mask, matched_indices, torch.tensor(-1, device=device))
+        # 应用变换 T_0to1 (从 image0 到 image1)
+        # T_0to1: [B, 3, 3]
+        kpts0_transformed = torch.bmm(kpts0_homo, T_0to1.transpose(-2, -1))  # [B, N, 3]
         
-        return matches_gt
+        # 归一化齐次坐标
+        kpts0_in_1 = kpts0_transformed[:, :, :2] / (kpts0_transformed[:, :, 2:3] + 1e-8)  # [B, N, 2]
+        
+        # 计算 kpts0_in_1 和 kpts1 之间的距离矩阵
+        # 扩展维度以便计算距离
+        kpts0_exp = kpts0_in_1.unsqueeze(2)  # [B, N, 1, 2]
+        kpts1_exp = kpts1.unsqueeze(1)       # [B, 1, M, 2]
+        
+        # 计算 L2 距离
+        dist = torch.norm(kpts0_exp - kpts1_exp, dim=-1)  # [B, N, M]
+        
+        # 找到距离小于阈值的匹配对
+        match_mask = dist < dist_th  # [B, N, M]
+        
+        # 对于每个 kpts0 中的点，找到最近的 kpts1 匹配
+        gt_matches0 = torch.argmin(dist, dim=-1)  # [B, N]
+        gt_matches1 = torch.argmin(dist, dim=-2)  # [B, M]
+        
+        # 双向匹配
+        match0_valid = torch.arange(kpts0.shape[1], device=device).unsqueeze(0).expand(B, -1)
+        match1_valid = torch.arange(kpts1.shape[1], device=device).unsqueeze(0).expand(B, -1)
+        
+        # 检查双向匹配一致性
+        valid0 = torch.gather(gt_matches1, 1, gt_matches0) == match0_valid
+        valid1 = torch.gather(gt_matches0, 1, gt_matches1) == match1_valid
+        
+        # 返回有效的 GT 匹配
+        return gt_matches0, valid0
 
-    def _compute_loss(self, outputs, kpts0, kpts1, T_0to1, vessel_mask0=None):
-        """计算加权负对数似然损失（支持血管引导）"""
-        scores = outputs['log_assignment']
-        matches_gt = self._compute_gt_matches(kpts0, kpts1, T_0to1)
+    def _compute_loss(self, outputs, batch):
+        """计算损失（SuperGlue 使用 Sinkhorn 输出）"""
+        # SuperGlue 的 scores 输出是 log-space 的 Sinkhorn 结果
+        # 形状: [B, M+1, N+1] (包含 dustbin)
         
-        B, M, N = scores.shape[0], scores.shape[1]-1, scores.shape[2]-1
+        if 'scores' not in outputs:
+            return None
+            
+        scores = outputs['scores']  # [B, M+1, N+1]
+        keypoints0 = outputs.get('keypoints0', None)  # list of [N, 2]
+        keypoints1 = outputs.get('keypoints1', None)  # list of [M, 2]
         
-        targets = matches_gt.clone()
-        targets[targets == -1] = N
+        # 获取 GT 变换矩阵
+        if 'T_0to1' not in batch:
+            # 如果没有 GT 变换，使用简单的损失（基于分数）
+            return self._compute_simple_loss(scores)
         
-        target_log_probs = torch.gather(scores[:, :M, :], 2, targets.unsqueeze(2)).squeeze(2)
+        T_0to1 = batch['T_0to1']  # [B, 3, 3]
         
-        # 如果提供了血管掩码，进行加权
-        if vessel_mask0 is not None and self.vessel_loss_weight > 1.0:
-            weights = self._compute_vessel_weights(kpts0, vessel_mask0)
-            weighted_log_probs = target_log_probs * weights
-            loss = -weighted_log_probs.mean()
+        # 计算 GT 匹配
+        gt_matches0, valid_matches = self._compute_gt_matches(
+            keypoints0, keypoints1, T_0to1, dist_th=5.0
+        )
+        
+        if gt_matches0 is None:
+            return self._compute_simple_loss(scores)
+        
+        # SuperGlue 交叉熵损失
+        # scores: [B, M+1, N+1] -> [B, N+1, M+1] 以便对齐
+        scores_trans = scores.transpose(1, 2)  # [B, N+1, M+1]
+        
+        B = scores.shape[0]
+        device = scores.device
+        
+        # 创建 GT 标签
+        # 对于每个 image0 中的关键点，gt_matches0 给出对应的 image1 索引
+        # valid_matches 标记哪些是有效匹配
+        
+        loss = 0.0
+        valid_count = 0
+        
+        for b in range(B):
+            # scores_trans[b]: [N+1, M+1]
+            # 对于 N 个点，预测 M+1 个匹配（包括 dustbin）
+            
+            gt_match = gt_matches0[b]  # [N]
+            valid = valid_matches[b]   # [N]
+            
+            # 只对有效匹配计算损失
+            if valid.sum() == 0:
+                continue
+            
+            # 获取对应位置的预测分数
+            # scores_trans[b][i] 是第 i 个 keypoint0 对所有 keypoint1 的分数
+            # gt_match[i] 是第 i 个 keypoint0 对应的 GT keypoint1 索引
+            
+            # 避免索引越界
+            max_idx = scores_trans.shape[2] - 1
+            gt_match_clamped = gt_match.clamp(0, max_idx)
+            
+            # 提取正样本分数（匹配位置）
+            pos_scores = scores_trans[b][torch.arange(len(gt_match), device=device), gt_match_clamped]
+            
+            # 交叉熵损失: -log(exp(pos) / sum(exp(all)))
+            # 使用 logsumexp 技巧避免数值问题
+            # 注意：scores_trans[b] 的形状是 [N+1, M+1]，dustbin 行是最后一列
+            # 对每个 keypoint0 的 N 行（不含 dustbin 列）计算 logsumexp
+            log_probs = pos_scores - torch.logsumexp(scores_trans[b, :len(gt_match)], dim=-1)
+            
+            # 只对有效匹配计算损失
+            valid_log_probs = log_probs[valid]
+            if len(valid_log_probs) > 0:
+                loss = loss - valid_log_probs.mean()
+                valid_count += 1
+        
+        if valid_count > 0:
+            loss = loss / valid_count
         else:
-            loss = -target_log_probs.mean()
+            loss = self._compute_simple_loss(scores)
         
         return loss
     
-    def _compute_vessel_weights(self, kpts0, vessel_mask0):
-        """计算基于血管掩码的权重"""
-        B, M, _ = kpts0.shape
-        device = kpts0.device
-        weights = torch.ones(B, M, device=device)
+    def _compute_simple_loss(self, scores):
+        """计算简单的损失：最大化匹配分数"""
+        # scores: [B, M+1, N+1]
+        # 鼓励更高的匹配分数
         
-        for b in range(B):
-            # vessel_mask0: [B, 1, H, W] 或 [B, H, W]
-            if vessel_mask0.dim() == 4:
-                mask = vessel_mask0[b, 0]  # [H, W]
-            else:
-                mask = vessel_mask0[b]  # [H, W]
-            
-            H, W = mask.shape
-            kpts = kpts0[b]  # [M, 2]
-            
-            # 将关键点坐标转换为整数索引
-            x_coords = torch.clamp(kpts[:, 0].long(), 0, W - 1)
-            y_coords = torch.clamp(kpts[:, 1].long(), 0, H - 1)
-            
-            # 检查关键点是否在血管上（mask > 0.5 表示血管）
-            is_on_vessel = mask[y_coords, x_coords] > 0.5
-            
-            # 血管上的点赋予高权重，背景点权重为1.0
-            weights[b, is_on_vessel] = self.vessel_loss_weight
+        # 使用 dustbin 的分数作为负样本（鼓励将不匹配的点发送到 dustbin）
+        dustbin_scores = scores[:, -1, :]  # [B, N+1]
+        keypoint_scores = scores[:, :-1, :]  # [B, M, N+1]
         
-        return weights
-
+        # 简单的损失：鼓励正样本分数高于 dustbin
+        # 使用对比损失
+        loss = -torch.mean(keypoint_scores) + 0.1 * torch.mean(dustbin_scores)
+        
+        return loss
+    
     def training_step(self, batch, batch_idx):
         """训练步骤（生成数据训练）"""
         # 可视化第一个 epoch 的前 2 个 batch
@@ -584,16 +760,12 @@ class PL_LightGlue_Gen(pl.LightningModule):
         
         outputs = self(batch)
         
-        # 获取血管掩码（如果存在）
-        vessel_mask0 = batch.get('vessel_mask0', None)
+        # 计算基于 GT 的损失
+        loss = self._compute_loss(outputs, batch)
         
-        loss = self._compute_loss(
-            outputs, 
-            batch['keypoints0'], 
-            batch['keypoints1'], 
-            batch['T_0to1'],
-            vessel_mask0
-        )
+        # 如果损失为 None，使用简单损失
+        if loss is None:
+            loss = torch.tensor(0.0, device=self.device, requires_grad=False)
         
         self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/vessel_weight', self.vessel_loss_weight, on_step=False, on_epoch=True, prog_bar=True)
@@ -656,20 +828,45 @@ class PL_LightGlue_Gen(pl.LightningModule):
         
         logger.info(f"Batch {batch_idx} 可视化完成，共 {batch_size} 个样本")
 
+    def _extract_and_match(self, batch):
+        """提取特征并匹配（用于验证）"""
+        # 提取特征
+        feats = self._extract_features(batch)
+        
+        keypoints0 = feats['keypoints0']
+        keypoints1 = feats['keypoints1']
+        scores0 = feats['scores0']
+        scores1 = feats['scores1']
+        descriptors0 = feats['descriptors0']
+        descriptors1 = feats['descriptors1']
+        
+        # SuperGlue 匹配
+        data = {
+            'image0': batch['image0'],
+            'image1': batch['image1'],
+            'keypoints0': keypoints0,
+            'keypoints1': keypoints1,
+            'scores0': scores0,
+            'scores1': scores1,
+            'descriptors0': descriptors0,
+            'descriptors1': descriptors1,
+        }
+        
+        outputs = self.matcher(data)
+        
+        # 保留原始关键点用于后续处理
+        outputs['keypoints0'] = keypoints0
+        outputs['keypoints1'] = keypoints1
+        
+        return outputs
+
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         """验证步骤（使用统一的评估器）"""
-        outputs = self(batch)
+        outputs = self._extract_and_match(batch)
         
-        # 计算验证损失
-        vessel_mask0 = batch.get('vessel_mask0', None)
-        loss = self._compute_loss(
-            outputs, 
-            batch['keypoints0'], 
-            batch['keypoints1'], 
-            batch['T_0to1'],
-            vessel_mask0
-        )
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        # 将关键点添加到 batch 中（因为 evaluator 从 batch 读取 keypoints0/1）
+        batch['keypoints0'] = outputs['keypoints0']
+        batch['keypoints1'] = outputs['keypoints1']
         
         # 使用统一的评估器
         result = self.evaluator.evaluate_batch(batch, outputs, self)
@@ -703,7 +900,7 @@ class MultimodalValidationCallback(Callback):
         super().__init__()
         self.args = args
         self.best_val = -1.0
-        self.result_dir = Path(f"results/lightglue_gen/{args.name}")
+        self.result_dir = Path(f"/data/student/Fengjunming/diffusion_registration/SuperGluePretrainedNetwork/results/superglue_gen/{args.name}")
         self.result_dir.mkdir(parents=True, exist_ok=True)
         self.epoch_mses = []
         self.epoch_maces = []
@@ -909,9 +1106,9 @@ class MultimodalValidationCallback(Callback):
         img0_color = cv2.cvtColor(img0, cv2.COLOR_GRAY2BGR)
         img1_color = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
         
-        if 'kpts0' in outputs and 'kpts1' in outputs:
-            kpts0_np = outputs['kpts0'][sample_idx].cpu().numpy() if hasattr(outputs['kpts0'][sample_idx], 'cpu') else batch['keypoints0'][sample_idx].cpu().numpy()
-            kpts1_np = outputs['kpts1'][sample_idx].cpu().numpy() if hasattr(outputs['kpts1'][sample_idx], 'cpu') else batch['keypoints1'][sample_idx].cpu().numpy()
+        if 'keypoints0' in outputs and 'keypoints1' in outputs:
+            kpts0_np = outputs['keypoints0'][sample_idx].cpu().numpy()
+            kpts1_np = outputs['keypoints1'][sample_idx].cpu().numpy()
             
             # 绘制所有关键点（白色）
             for pt in kpts0_np:
@@ -921,7 +1118,7 @@ class MultimodalValidationCallback(Callback):
             
             # 绘制匹配点（红色）
             if 'matches0' in outputs:
-                m0 = outputs['matches0'][sample_idx].cpu() if hasattr(outputs['matches0'][sample_idx], 'cpu') else outputs['matches0'][sample_idx]
+                m0 = outputs['matches0'][sample_idx].cpu()
                 valid = m0 > -1
                 m_indices_0 = torch.where(valid)[0].numpy()
                 m_indices_1 = m0[valid].numpy()
@@ -936,13 +1133,18 @@ class MultimodalValidationCallback(Callback):
                 # 使用 viz2d 绘制匹配连线
                 try:
                     fig = plt.figure(figsize=(12, 6))
+                    from lightglue import viz2d
                     viz2d.plot_images([img0, img1])
-                    if len(m_indices_0) > 0:
+                    if len(m_indices_0) > 0 and len(m_indices_1) > 0:
                         viz2d.plot_matches(kpts0_np[m_indices_0], kpts1_np[m_indices_1], color='lime', lw=0.5)
                     plt.savefig(str(save_path / "matches.png"), bbox_inches='tight', dpi=100)
-                    plt.close(fig)
+                    plt.close('all')
                 except Exception as e:
                     logger.warning(f"绘制匹配图失败: {e}")
+                    try:
+                        plt.close('all')
+                    except:
+                        pass
         
         cv2.imwrite(str(save_path / "fix_with_kpts.png"), img0_color)
         cv2.imwrite(str(save_path / "moving_with_kpts.png"), img1_color)
@@ -1010,14 +1212,18 @@ class DelayedEarlyStopping(EarlyStopping):
 # 参数解析和主函数
 # ==========================================
 def parse_args():
-    parser = argparse.ArgumentParser(description="LightGlue Vessel-Guided Training")
-    parser.add_argument('--name', '-n', type=str, default='260303_vessel_guided', help='训练名称')
+    parser = argparse.ArgumentParser(description="SuperGlue 训练脚本")
+    parser.add_argument('--name', '-n', type=str, default='260303_superglue', help='训练名称')
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--img_size', type=int, default=512)
     parser.add_argument('--start_point', type=str, default=None, help='从检查点恢复训练')
     parser.add_argument('--max_epochs', type=int, default=200)
     parser.add_argument('--gpus', type=str, default='1')
+    parser.add_argument('--superpoint_pretrained', type=str, default=None,
+                        help='SuperPoint 预训练权重路径 (默认从 models/weights/ 加载，如果不存在会自动下载)')
+    parser.add_argument('--superglue_pretrained', type=str, default=None,
+                        help='SuperGlue 预训练权重路径 (默认从 models/weights/ 加载 indoor 权重)')
     
     # 课程学习参数
     parser.add_argument('--teaching_end', type=int, default=50, help='教学期结束 epoch')
@@ -1037,8 +1243,26 @@ def main():
     config.TRAINER.PATIENCE = args.patience  # 使用传入的 patience 值
     pl.seed_everything(config.TRAINER.SEED)
     
+    # 设置 SuperPoint 预训练权重路径
+    if args.superpoint_pretrained:
+        config.SUPERPOINT_PRETRAINED = args.superpoint_pretrained
+    else:
+        # 默认路径：如果不存在会自动下载
+        default_sp_path = Path(__file__).parent.parent / 'models' / 'weights' / 'superpoint_v1.pth'
+        config.SUPERPOINT_PRETRAINED = str(default_sp_path)
+        logger.info(f"SuperPoint 预训练权重路径: {config.SUPERPOINT_PRETRAINED}")
+    
+    # 设置 SuperGlue 预训练权重路径
+    if args.superglue_pretrained:
+        config.SUPERGLUE_PRETRAINED = args.superglue_pretrained
+    else:
+        # 默认路径：加载 indoor 权重
+        default_sg_path = Path(__file__).parent.parent / 'models' / 'weights' / 'superglue_indoor.pth'
+        config.SUPERGLUE_PRETRAINED = str(default_sg_path)
+        logger.info(f"SuperGlue 预训练权重路径: {config.SUPERGLUE_PRETRAINED}")
+    
     # 修复路径
-    result_dir = Path(f"results/lightglue_{args.mode}/{args.name}")
+    result_dir = Path(f"/data/student/Fengjunming/diffusion_registration/SuperGluePretrainedNetwork/results/superglue_{args.mode}/{args.name}")
     result_dir.mkdir(parents=True, exist_ok=True)
     log_file = result_dir / "log.txt"
     
@@ -1070,13 +1294,13 @@ def main():
     config.TRAINER.TRUE_LR = config.TRAINER.CANONICAL_LR * _scaling
     
     # 初始化模型
-    model = PL_LightGlue_Gen(config, result_dir=str(result_dir))
+    model = PL_SuperGlue_Gen(config, result_dir=str(result_dir))
     
     # 初始化数据模块
     data_module = MultimodalDataModule(args, config)
     
     # TensorBoard 日志
-    tb_logger = TensorBoardLogger(save_dir='logs/tb_logs', name=f"lightglue_{args.name}")
+    tb_logger = TensorBoardLogger(save_dir='logs/tb_logs', name=f"superglue_{args.name}")
     
     # 早停配置
     early_stop_callback = DelayedEarlyStopping(
@@ -1097,7 +1321,7 @@ def main():
     )
     
     logger.info("=" * 80)
-    logger.info("【血管引导训练】")
+    logger.info("【SuperGlue 训练】")
     logger.info("=" * 80)
     logger.info(f"课程学习配置: Teaching[0-{args.teaching_end}]={args.max_vessel_weight}, "
                 f"Weaning[{args.teaching_end}-{args.weaning_end}]={args.max_vessel_weight}->{args.min_vessel_weight}, "
@@ -1138,9 +1362,8 @@ def main():
     ckpt_path = args.start_point if args.start_point else None
     
     logger.info(f"开始训练 (训练集: 260311_multiGen_aug 生成数据 | 验证集: CFFA+CFOCT+OCTFA 合并真实数据(全量)): {args.name}")
-    logger.info("策略: 血管loss引导的课程学习")
+    logger.info("模型: SuperGlue + SuperPoint")
     trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
 
 if __name__ == '__main__':
     main()
-

@@ -43,6 +43,28 @@
 from pathlib import Path
 import torch
 from torch import nn
+import os
+import urllib.request
+
+def download_superpoint_weights(download_path):
+    """自动下载 SuperPoint 预训练权重"""
+    download_path = Path(download_path)
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # SuperPoint v1 预训练权重 URL (Magic Leap 的官方权重)
+    url = "https://github.com/magicleap/SuperPointPretrainedNetwork/raw/master/superpoint_v1.pth"
+    
+    print(f"正在从 {url} 下载 SuperPoint 预训练权重...")
+    print(f"保存到: {download_path}")
+    
+    try:
+        urllib.request.urlretrieve(url, str(download_path))
+        print(f"下载完成: {download_path}")
+        return True
+    except Exception as e:
+        print(f"下载失败: {e}")
+        return False
+
 
 def simple_nms(scores, nms_radius: int):
     """ Fast Non-maximum suppression to remove nearby points """
@@ -141,7 +163,18 @@ class SuperPoint(nn.Module):
             if path.exists():
                 self.load_state_dict(torch.load(str(path)))
             else:
-                print('Warning: SuperPoint v1 weights not found at {}, training from random init'.format(path))
+                # 尝试自动下载
+                print(f'SuperPoint v1 weights not found at {path}')
+                print('Attempting to download from official source...')
+                if download_superpoint_weights(path):
+                    self.load_state_dict(torch.load(str(path)))
+                else:
+                    raise RuntimeError(
+                        'Failed to download SuperPoint pretrained weights. '
+                        'Please manually download from: '
+                        'https://github.com/magicleap/SuperPointPretrainedNetwork/raw/master/superpoint_v1.pth '
+                        f'and save to: {path}'
+                    )
 
         mk = self.config['max_keypoints']
         if mk == 0 or mk < -1:
